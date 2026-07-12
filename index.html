@@ -614,6 +614,7 @@ function wallH(b,y,x0,x1,gaps){
   for(let x=x0;x<=x1;x++){
     if(gaps&&gaps.includes(x))continue;
     if(ground[idx(x,y)]!==G_FLOOR)continue;
+    if(nearOpening(b,x,y))continue; // стены не перекрывают подходы к дверям/окнам
     ground[idx(x,y)]=G_WALL;solid[idx(x,y)]=1;
   }
 }
@@ -621,8 +622,27 @@ function wallV(b,x,y0,y1,gaps){
   for(let y=y0;y<=y1;y++){
     if(gaps&&gaps.includes(y))continue;
     if(ground[idx(x,y)]!==G_FLOOR)continue;
+    if(nearOpening(b,x,y))continue;
     ground[idx(x,y)]=G_WALL;solid[idx(x,y)]=1;
   }
+}
+function innerFreeSpot(b){
+  // BFS от внутренней стороны главной двери: гарантированно достижимая точка
+  const startX=b.doorX,startY=b.doorY===b.ty?b.doorY+1:b.doorY-1;
+  const seen=new Set(),q=[[startX,startY,0]];
+  let best=null;
+  while(q.length){
+    const [x,y,d]=q.shift();
+    const t=idx(x,y);
+    if(seen.has(t))continue;seen.add(t);
+    if(!inMap(x,y)||bmap[t]!==b.id||solid[t]||ground[t]!==G_FLOOR)continue;
+    let free=0;
+    for(const[dx,dy]of[[1,0],[-1,0],[0,1],[0,-1]])if(inMap(x+dx,y+dy)&&!solid[idx(x+dx,y+dy)])free++;
+    if(d>=2&&free>=2)return {x:x*TILE+16,y:y*TILE+16};
+    if(!best||free>=2)best={x:x*TILE+16,y:y*TILE+16};
+    for(const[dx,dy]of[[1,0],[-1,0],[0,1],[0,-1]])q.push([x+dx,y+dy,d+1]);
+  }
+  return best||{x:(b.tx+2)*TILE+16,y:(b.ty+2)*TILE+16};
 }
 function nearOpening(b,x,y){
   // правило: мебель и ящики никогда не блокируют двери и окна
@@ -655,7 +675,8 @@ function planInterior(b){
       const bed=addC(b,'bed',ix1,iy0,true);
       addC(b,'wardrobe',ix1-1,iy0);
       addC(b,'sofa',ix0+1,iy0+2)||addC(b,'sofa',ix0,iy0+2);
-      b.homeSpots.push({x:(ix0+1)*TILE,y:(iy1)*TILE,bed});
+      const spot=innerFreeSpot(b);
+      b.homeSpots.push({x:spot.x,y:spot.y,bed});
       if(type==='home'){const c=b.containers.find(c=>c.type==='cabinet');if(c)c.special='homekit'}
       break;}
     case 'flat':{
@@ -1960,8 +1981,13 @@ function dayFlavor(d){
    Мир остаётся на прямоугольной сетке; проекция:
    sx = (x−y)·k, sy = (x+y)·k/2, высота — вычитание по экрану.
    ============================================================ */
-const ISOK=1.0, WALLH=46;
+let ISOK=1.15;
+const WALLH=46;
 let isoOX=0,isoOY=0;
+addEventListener('wheel',e=>{
+  if(state!=='play'&&state!=='pause')return;
+  ISOK=clamp(ISOK*(e.deltaY<0?1.12:1/1.12),.55,2.4);
+},{passive:true});
 function S(x,y){return [isoOX+(x-y)*ISOK, isoOY+(x+y)*ISOK*.5]}
 function screenToWorld(sx,sy){
   const dx=(sx-isoOX)/ISOK, dy=(sy-isoOY)/ISOK;
