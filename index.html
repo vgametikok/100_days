@@ -174,7 +174,7 @@ button.pri:hover{background:var(--red2)}
   Первый, кто пройдёт игру на <b>хардкоре</b> без читов и без единой смерти, получит <b>$100 000</b>.</div>
   <div class="stats" id="menustats"></div>
   <div class="btns">
-    <button class="pri" id="btnPlay">Играть</button>
+    <button class="pri" id="btnPlay">Новая игра</button>
     <button id="btnHard">☠ Хардкор</button>
     <button id="btnHelp">Как играть</button>
   </div>
@@ -192,8 +192,8 @@ button.pri:hover{background:var(--red2)}
     <div><b>Esc</b> пауза</div>
   </div>
   <div class="hint">День 1 — обычный день: город живёт, магазины работают, у вас есть немного денег.<br>
-  Цель: <b>выбраться из города</b> (кусачки → проволока) или <b>прожить 100 дней</b> до зимы.<br>
-  Вирус передаётся со слюной: остерегайтесь укусов, вскрытой воды и недоеденной еды.</div>
+  Город окружён лесом и горами, единственный мост — на ремонте. Выхода нет.<br>
+  Цель: <b>прожить 100 дней</b> — на сотый день придёт армия. Вирус передаётся со слюной.</div>
 </div>
 
 <div id="charsel" class="screen hidden">
@@ -261,7 +261,7 @@ const pickW=arr=>arr[Math.floor(RW()*arr.length)];
 const TILE=32, MW=140, MH=96, W=MW*TILE, H=MH*TILE;
 const DAY_SEC=420;               // 1 игровой день = 7 минут
 const ZOOM=1.3;
-const G_GRASS=0,G_ROAD=1,G_SIDE=2,G_PARK=3,G_PLAZA=4,G_FLOOR=5,G_YARD=6,G_WALL=7,G_SAND=8,G_WATER=9;
+const G_GRASS=0,G_ROAD=1,G_SIDE=2,G_PARK=3,G_PLAZA=4,G_FLOOR=5,G_YARD=6,G_WALL=7,G_SAND=8,G_WATER=9,G_BRIDGE=10,G_ROCK=11;
 
 /* ---------- STATE ---------- */
 let state='menu';
@@ -273,6 +273,7 @@ let quarantined=false;
 let cam={x:0,y:0,shake:0};
 let ground,solid,bmap;
 let buildings=[],trees=[],cars=[],lamps=[],towers=[],gates=[],props=[],busStops=[];
+let bridge=null; // единственный выход из города — мост (в ремонте)
 let vehicles=[];
 let doorsMap=new Map();
 let npcs=[],bullets=[],parts=[],groundItems=[],corpses=[],noises=[];
@@ -395,6 +396,7 @@ const BTYPES={
   house:  {name:'ЖИЛОЙ ДОМ', roof:'#4a3f38'},
   flat:   {name:'МНОГОКВАРТИРНЫЙ ДОМ',roof:'#3d4048'},
   shop:   {name:'МАГАЗИН',   roof:'#474038'},
+  cafe:   {name:'КАФЕ «У МОСТА»',roof:'#5a4636'},
   market: {name:'СУПЕРМАРКЕТ',roof:'#3a4a42'},
   gun:    {name:'ОРУЖЕЙНЫЙ', roof:'#4a3a3a'},
   pharm:  {name:'АПТЕКА',    roof:'#3a4a4a'},
@@ -446,17 +448,7 @@ function genWorld(){
     blockPlan.set(rest[k],pi<restPlans.length?restPlans[pi++]:'houses');
   }
   for(const bl of blocks)buildBlock(bl,blockPlan.get(bl)||'houses');
-  // вышки (появятся при карантине, координаты заранее)
-  for(let x=14;x<MW-10;x+=26){towers.push({x:x*TILE,y:2.5*TILE,ang:0});towers.push({x:x*TILE,y:(MH-2.5)*TILE,ang:0})}
-  for(let y=16;y<MH-10;y+=24){towers.push({x:2.5*TILE,y:y*TILE,ang:0});towers.push({x:(MW-2.5)*TILE,y:y*TILE,ang:0})}
-  // выезды: полицейские кордоны с 1-го дня («авария на трассе»)
-  for(const v of ROADV){gates.push({x:(v+2)*TILE,y:2.5*TILE,vert:true});gates.push({x:(v+2)*TILE,y:(MH-2.5)*TILE,vert:true})}
-  for(const h of ROADH){gates.push({x:2.5*TILE,y:(h+2)*TILE,vert:false});gates.push({x:(MW-2.5)*TILE,y:(h+2)*TILE,vert:false})}
-  for(const g of gates){ // кордон занимает дорогу
-    const gtx=(g.x/TILE)|0,gty=(g.y/TILE)|0;
-    if(g.vert)for(let x=gtx-2;x<=gtx+2;x++)solid[idx(x,gty)]=1;
-    else for(let y=gty-2;y<=gty+2;y++)solid[idx(gtx,y)]=1;
-  }
+  genNature(); // лес, горы, река и единственный мост
   // фонари вдоль дорог
   for(const v of ROADV)for(let y=8;y<MH-6;y+=9)lamps.push({x:(v-1)*TILE+16,y:y*TILE});
   for(const h of ROADH)for(let x=8;x<MW-6;x+=9)lamps.push({x:x*TILE,y:(h-1)*TILE+16});
@@ -479,6 +471,48 @@ function genWorld(){
   }
   prerenderGround();
   prerenderMinimap();
+}
+function genNature(){
+  // город окружён лесом и горами; на юге река, через неё — единственный мост
+  const bx=ROADV[2];
+  const ry0=MH-6,ry1=MH-3;
+  for(let y=ry0;y<=ry1;y++)for(let x=0;x<MW;x++){ground[idx(x,y)]=G_WATER;solid[idx(x,y)]=1}
+  const rock=(x,y)=>{if(!inMap(x,y))return;ground[idx(x,y)]=G_ROCK;solid[idx(x,y)]=1};
+  for(let x=0;x<MW;x++){for(let y=0;y<3;y++)rock(x,y);for(let y=MH-2;y<MH;y++)rock(x,y)}
+  for(let y=0;y<MH;y++){for(let x=0;x<3;x++)rock(x,y);for(let x=MW-3;x<MW;x++)rock(x,y)}
+  // плотная лесополоса вдоль каймы
+  const forest=(x,y)=>{
+    if(!inMap(x,y)||solid[idx(x,y)])return;
+    const g=ground[idx(x,y)];
+    if(g===G_ROAD||g===G_SIDE||g===G_WATER||g===G_ROCK)return;
+    if(bmap[idx(x,y)]>=0)return;
+    solid[idx(x,y)]=1;trees.push({x:x*TILE+16,y:y*TILE+16,r:13+RW()*9});
+  };
+  for(let x=3;x<MW-3;x++){if(RW()<.75)forest(x,3);if(RW()<.55)forest(x,4);
+    if(RW()<.75)forest(x,ry0-2);if(RW()<.45)forest(x,ry0-3)}
+  for(let y=3;y<ry0-1;y++){if(RW()<.75)forest(3,y);if(RW()<.55)forest(4,y);
+    if(RW()<.75)forest(MW-4,y);if(RW()<.55)forest(MW-5,y)}
+  // дороги, упирающиеся в лес, закрываем деревьями (тупики)
+  for(const v of ROADV){if(v===bx)continue;
+    for(let x=v-1;x<=v+4;x++){forceTree(x,3);forceTree(x,4)}
+    for(let x=v-1;x<=v+4;x++){forceTree(x,ry0-2);forceTree(x,ry0-1)}}
+  for(const h of ROADH)for(let y=h-1;y<=h+4;y++){forceTree(3,y);forceTree(4,y);forceTree(MW-4,y);forceTree(MW-5,y)}
+  // северный конец мостовой дороги тоже упирается в лес
+  for(let x=bx-1;x<=bx+4;x++){forceTree(x,3);forceTree(x,4)}
+  // мост: настил через реку
+  for(let y=ry0;y<=ry1;y++)for(let x=bx;x<bx+4;x++){ground[idx(x,y)]=G_BRIDGE;solid[idx(x,y)]=0}
+  // стройка: мост закрыт с городской стороны
+  for(let x=bx;x<bx+4;x++)solid[idx(x,ry0)]=1;
+  props.push({x:(bx+2)*TILE,y:ry0*TILE+14,t:'fence'});
+  bridge={cx:(bx+2)*TILE,barY:ry0*TILE,
+    signX:(bx+4)*TILE+14,signY:(ry0-1)*TILE+18,
+    posts:[{x:(bx+1)*TILE-6,y:(ry0+2)*TILE+16},{x:(bx+3)*TILE+6,y:(ry0+2)*TILE+16},
+           {x:(bx+2)*TILE,y:(ry0+3)*TILE+8}]};
+}
+function forceTree(x,y){
+  if(!inMap(x,y)||solid[idx(x,y)])return;
+  if(ground[idx(x,y)]===G_WATER||ground[idx(x,y)]===G_ROCK)return;
+  solid[idx(x,y)]=1;trees.push({x:x*TILE+16,y:y*TILE+16,r:14+RW()*8});
 }
 function placeCar(tx,ty,vert){
   const w=vert?1:2,h=vert?2:1;
@@ -548,12 +582,12 @@ function buildBlock(bl,plan){
       fillBlock(bl,G_YARD);
       placeBuilding(bx+1,by+1,8,6,'pharm');
       placeBuilding(bx+1,by+8,9,6,'tools');
-      if(bw>=13)placeBuilding(bx+10,by+1,Math.min(bw-11,7),6,'shop');
+      if(bw>=13)placeBuilding(bx+10,by+1,Math.min(bw-11,7),6,'cafe');
       return;}
     case 'shopsB':{
       fillBlock(bl,G_YARD);
       placeBuilding(bx+1,by+1,8,6,'gun');
-      placeBuilding(bx+1,by+8,Math.min(bw-2,8),6,'shop');
+      placeBuilding(bx+1,by+8,Math.min(bw-2,8),6,'cafe');
       if(bw>=13)placeBuilding(bx+10,by+1,Math.min(bw-11,7),6,'shop');
       return;}
     case 'home':{
@@ -593,7 +627,7 @@ function placeBuilding(tx,ty,tw,th,type){
   }
   // главная дверь — всегда на южной стене (виден фасад)
   const dx=tx+Math.floor(tw/2), dy=ty+th-1;
-  const locked=!['shop','market','pharm','office','tools','gun','hosp','home'].includes(type);
+  const locked=!['shop','market','pharm','office','tools','gun','hosp','home','cafe'].includes(type);
   addDoor(b,dx,dy,locked,type==='police'||type==='gun'?160:90);
   b.doorX=dx;b.doorY=dy;
   // окна: только север/юг (видны фасады)
@@ -713,6 +747,12 @@ function planInterior(b){
       b.jobSpots.push({x:(b.doorX-2)*TILE+16,y:(iy1-1)*TILE},{x:(b.doorX+2)*TILE+16,y:(iy1-1)*TILE},
         {x:(ix0+2)*TILE,y:(iy0+5)*TILE},{x:(ix1-1)*TILE,y:(iy0+5)*TILE});
       break;}
+    case 'cafe':{
+      addC(b,'counter',midX-1,iy1);addC(b,'counter',midX,iy1);
+      addC(b,'fridge',ix0,iy0);addC(b,'shelf',ix0+1,iy0);
+      for(let tx2=ix0;tx2<=ix1;tx2+=2)for(let ty2=iy0+2;ty2<=iy1-2;ty2+=2)addC(b,'table',tx2,ty2);
+      b.jobSpots.push({x:(midX-1)*TILE+16,y:(iy1-1)*TILE},{x:midX*TILE+16,y:(iy1-1)*TILE});
+      break;}
     case 'shop': case 'pharm': case 'tools': case 'gun':{
       const ct=type==='pharm'?'medcab':type==='tools'?'toolbox':type==='gun'?'gunrack':'shelf';
       wallH(b,iy0+1,ix1-2,ix1,[]); // кладовка уголок
@@ -789,11 +829,12 @@ function planInterior(b){
   const stockFor={
     shelf:['canned','canned','snack','snack','waterS','waterS'],
     medcab:['bandage','bandage','pills','antib'],
-    toolbox:['crowbar','flash','radio','lockpick','lockpick','planks','planks','cutters'],
+    toolbox:['crowbar','flash','radio','lockpick','lockpick','planks','planks'],
     gunrack:['knife','bat','ammo9','ammo9','pistol'],
   };
-  if(['market','shop','pharm','tools','gun'].includes(type)){
+  if(['market','shop','pharm','tools','gun','cafe'].includes(type)){
     for(const c of b.containers){
+      if(type==='cafe'&&c.type==='counter'){c.stock=['snack','snack','waterS','canned'].slice(0,2+Math.floor(RW()*3));continue}
       if(stockFor[c.type])c.stock=stockFor[c.type].slice(0,3+Math.floor(RW()*3));
     }
   }
@@ -826,7 +867,8 @@ const ITEMS={
   planks:{n:'Доски',icon:'🪵',stack:6},
 };
 const PRICE={canned:120,snack:60,waterS:90,bandage:150,pills:450,antib:800,knife:300,bat:400,
-  crowbar:650,pistol:4500,ammo9:400,shells:500,flash:350,radio:550,cutters:1300,lockpick:250,planks:120};
+  crowbar:650,pistol:4500,ammo9:400,shells:500,flash:350,radio:550,lockpick:250,planks:120};
+let nightSurgeFrac=.35; // 20–50% населения обращается в первую ночь (ролл на забег)
 const BUYCOUNT={ammo9:12,shells:8,planks:2,lockpick:2};
 function hasItem(t){return P.inv.some(s=>s&&s.t===t)}
 function countItem(t){return P.inv.reduce((a,s)=>a+(s&&s.t===t?s.c:0),0)}
@@ -853,9 +895,14 @@ function curWeapon(){const s=P.inv[P.sel];if(s&&(ITEMS[s.t].melee||ITEMS[s.t].gu
 
 /* ---------- МАГАЗИН / ЛУТ ---------- */
 function shopOpen(b){
-  if(quarantined)return false;
-  if(!['market','shop','pharm','tools','gun'].includes(b.type))return false;
+  if(!['market','shop','pharm','tools','gun','cafe'].includes(b.type))return false;
   const h=hour();return h>=8&&h<20&&day===1;
+}
+/* ---------- СМИ: паблик Handbook → листовки-газета ---------- */
+function mediaAlive(){return npcs.some(n=>n.kind==='res'&&!n.dead&&n.job&&n.job.type==='media')}
+function cityNews(t){
+  if(!mediaAlive())return; // журналисты мертвы — городских новостей больше нет
+  ticker((day<3?'Handbook · паблик «Наш город»: ':'«Голос города», листовка: ')+t);
 }
 function buyFrom(c){
   const t=c.stock[0],price=PRICE[t]||100;
@@ -885,7 +932,9 @@ function lootRoll(ctype){
     case 'toolbox':
       if(R()<.5)add('crowbar',1);if(R()<.35)add('bat',1);
       if(R()<.3)add('flash',1);if(R()<.25)add('lockpick',ri(1,2));
-      if(R()<.45)add('planks',ri(1,3));if(R()<.2)add('radio',1);if(R()<.1)add('cutters',1);break;
+      if(R()<.45)add('planks',ri(1,3));if(R()<.2)add('radio',1);break;
+    case 'table':
+      if(R()<.25)add('snack',1);if(R()<.15)add('waterO',1);break;
     case 'wardrobe':
       if(R()<.5)add('bandage',1);if(R()<.4)add('snack',1);break;
     case 'crate':
@@ -1029,10 +1078,10 @@ function spawnPopulation(){
       for(const u of b.units)homes.push({b,spot:u.spot,bed:u.bed,door:u.door,cap:2});
     }
   }
-  // рабочие места
+  // рабочие места: основная часть города работает на заводе
   const jobs=[];
   for(const b of buildings){
-    const capBy={factory:20,hosp:6,office:9,police:5,fire:4,market:4,shop:2,pharm:2,tools:2,gun:2};
+    const capBy={factory:30,hosp:4,office:5,police:5,fire:4,market:4,shop:2,pharm:2,tools:2,gun:2,cafe:2};
     const cap=capBy[b.type]||0;
     for(let i=0;i<cap;i++)if(b.jobSpots.length)
       jobs.push({b,spot:b.jobSpots[i%b.jobSpots.length],type:b.type});
@@ -1052,8 +1101,10 @@ function spawnPopulation(){
         n.allow.add(idx(j.b.doorX,j.b.doorY));
         if(j.type==='police'){n.gun=true}
       }
-      const lk=pick(['park','beach','plaza','market']);
-      n.leisure=lk==='park'?randTileOfGround(G_PARK):lk==='beach'?randTileOfGround(G_SAND):
+      const lk=pick(['park','beach','plaza','market','cafe','cafe']);
+      if(lk==='cafe'){const cafes=buildings.filter(b=>b.type==='cafe');
+        n.leisure=cafes.length?innerFreeSpot(pick(cafes)):randTileOfGround(G_PARK)}
+      else n.leisure=lk==='park'?randTileOfGround(G_PARK):lk==='beach'?randTileOfGround(G_SAND):
         lk==='plaza'?randTileOfGround(G_PLAZA):(()=>{const m=buildings.find(b=>b.type==='market');
           return {x:m.doorX*TILE+16,y:(m.doorY+2)*TILE}})();
       n.wakeH=6.2+R()*1.3;n.workS=7.8+R()*1.2;n.workE=17+R()*1.5;n.sleepH=21.3+R()*1.7;
@@ -1062,19 +1113,42 @@ function spawnPopulation(){
     }
     if(made>=100)break;
   }
+  // особые профессии: медики скорой, СМИ, уборщики, курьеры, водители
+  const unemployed=npcs.filter(n=>n.kind==='res'&&!n.job);
+  const byType=t=>buildings.find(b=>b.type===t);
+  const spec=[['medic',byType('hosp'),2],['media',byType('office'),2],
+    ['janitor',byType('factory'),2],['janitor',byType('hosp'),1],
+    ['courier',byType('market'),3],['taxi',byType('office'),3],['bus',byType('office'),2]];
+  let ui=0;
+  for(const[tp,bb,cnt]of spec){
+    if(!bb)continue;
+    for(let k=0;k<cnt&&ui<unemployed.length;k++){
+      const n=unemployed[ui++];
+      n.job={b:bb.id,spot:bb.jobSpots[0]||{x:bb.doorX*TILE+16,y:(bb.doorY+1)*TILE},type:tp};
+      n.allow.add(idx(bb.doorX,bb.doorY));
+      if(tp==='courier')n.bike=true;
+    }
+  }
   // больные (обратятся в ночь на день 2)
   const res=npcs.filter(n=>n.kind==='res');
   for(let i=0;i<3&&i<res.length;i++){const s=res[ri(0,res.length-1)];s.sick=true;s.stats.hlt=1}
 }
 function spawnMilitary(){
+  // армия на мосту (день 3+) + редкие патрули по окраинным дорогам
+  if(!bridge)return;
   if(npcs.some(n=>n.kind==='mil'&&!n.police))return;
-  const inward=(x,y)=>({x:x+(x<180?36:x>W-180?-36:0),y:y+(y<180?36:y>H-180?-36:0)});
-  for(const t of towers){const p=inward(t.x,t.y);const m=spawnNPC('mil',p.x,p.y);m.post=p}
-  for(let i=0;i<4;i++){const g=gates[i*3%gates.length];const p=inward(g.x,g.y);
-    const m=spawnNPC('mil',p.x+ri(-14,14),p.y+ri(-14,14));m.post=p}
+  for(const p of bridge.posts){const m=spawnNPC('mil',p.x,p.y);m.post=p}
+  const r1=[{x:(ROADV[0]+2)*TILE,y:9*TILE},{x:(ROADV[0]+2)*TILE,y:(MH-12)*TILE}];
+  const r2=[{x:10*TILE,y:(ROADH[0]+2)*TILE},{x:(MW-10)*TILE,y:(ROADH[0]+2)*TILE}];
+  const r3=[{x:(ROADV[4]+2)*TILE,y:9*TILE},{x:(ROADV[4]+2)*TILE,y:(MH-12)*TILE}];
+  for(const route of [r1,r2,r3]){
+    for(let k=0;k<2;k++){const m=spawnNPC('mil',route[0].x+k*24,route[0].y+k*10);
+      m.patrol=route;m.pi=0}
+  }
 }
 function infectedTargetFrac(d){
-  return d<=1?0:d===2?.1:d===3?.2:d===4?.32:d===5?.45:d===6?.6:d===7?.72:Math.min(.92,.72+(d-7)*.04);
+  if(d<=1)return 0;
+  return Math.min(.92,nightSurgeFrac+(d-2)*.11);
 }
 function applyInfectionCurve(){
   const res=npcs.filter(n=>n.kind==='res'&&!n.dead);
@@ -1091,13 +1165,22 @@ function turnNPC(n){
   n.stats=rollInfStats(n.stats);
   if(wasMil){n.stats.spd=Math.max(n.stats.spd,7);n.stats.str=Math.max(n.stats.str,7)}
   n.hp=40+n.stats.str*8;n.bitten=0;n.state='idle';n.tgt=null;n.hunt=null;n.panic=0;
-  n.path=null;n.resting=false;n.escort=null;n.gun=false;
+  n.path=null;n.resting=false;n.escort=null;n.gun=false;n.turning=0;n.inCar=false;
   if(dist(n.x,n.y,P.x,P.y)<700){sfx.turn();spray(n.x,n.y,'#7a9a4a',14)}
+  // нулевой пациент: медленный, и его первая жертва не замечает опасности
+  if(n.patientZero&&!n.pzInit){
+    n.pzInit=true;
+    n.stats.spd=2;n.stats.int=3;n.stats.inf=7;
+    let vic=null,vd=1e9;
+    for(const r2 of npcs){if(r2.kind!=='res'||r2.dead||r2.inCar)continue;
+      const d2=dist(r2.x,r2.y,n.x,n.y);if(d2<vd){vd=d2;vic=r2}}
+    if(vic&&vd<520){vic.oblivious=n;n.state='chase';n.tgt=vic}
+  }
 }
 function killNPC(n,by){
   n.dead=true;
   corpses.push({x:n.x,y:n.y,kind:n.kind,ang:R()*7,t:0,
-    rise:(n.kind==='res'&&by==='inf'&&R()<.5)?ri(20,45):0});
+    rise:((n.kind==='res'||n.kind==='mil')&&by==='inf'&&R()<.5)?ri(20,45):0});
   bloodDecal(n.x,n.y,n.kind==='inf'||n.kind==='milinf'?'#3d5a2a':'#6a1414',18);
   spray(n.x,n.y,n.kind==='inf'||n.kind==='milinf'?'#5a7a3a':'#a02020',16);
   if((n.kind==='mil'||n.gun)&&R()<.6)groundItems.push({x:n.x,y:n.y,t:R()<.6?'ammo9':'pistol',c:R()<.6?ri(5,10):1});
@@ -1237,7 +1320,7 @@ function findZombieTarget(z){
   for(const n of npcs){
     if(n.dead||n===z)continue;
     if(n.kind==='inf'||n.kind==='milinf')continue;
-    if(n.bitten)continue;
+    if(n.bitten||n.inCar||n.turning)continue;
     const d=dist(z.x,z.y,n.x,n.y);
     if(d<bd&&d<vr&&los(z.x,z.y,n.x,n.y)){best=n;bd=d}
   }
@@ -1327,6 +1410,7 @@ function zombieAttack(z,t){
     hurtPlayer(dmg,'Вас разорвали зомби');
     knockback(P,Math.atan2(P.y-z.y,P.x-z.x),10);
     sfx.hit();spray(P.x,P.y,'#a02020',6);
+    P.dirty=true; // кровь на одежде
     if(R()<clamp(.13+(z.stats.luck-P.stats.luck)*.022,.04,.4)){
       P.inf+=5+z.stats.inf;P.infRate+=z.stats.inf*.013;
       msg('☣ ВАС УКУСИЛИ! Заражение началось','bad');sfx.scream();
@@ -1355,6 +1439,7 @@ function zombieAttack(z,t){
       const r=R();
       t.escort=r<.5?'hospital':r<.75?'home':null;
       t.panic=0;t.path=null;t.destKey='';
+      if(t.escort==='hospital')callAmbulance(t); // скорая с медиками выезжает
     }
   }
 }
@@ -1386,6 +1471,24 @@ function desiredSpot(n){
 function resBrain(n,dt){
   n.panic=Math.max(0,n.panic-dt);
   if(n.bitten){n.bitten-=dt;if(n.bitten<=0){turnNPC(n);return}}
+  if(n.inCar){const v=n.cab;if(v){n.x=v.x;n.y=v.y}return} // за рулём
+  // обращается: из помещения обязательно выбегает на улицу
+  if(n.turning&&n.turning>0){
+    n.turning-=dt;
+    if(R()<.03)spray(n.x,n.y-8,'#6a8a3a',2);
+    const inB=bmap[idx((n.x/TILE)|0,(n.y/TILE)|0)];
+    if(n.turning<=0){n.turning=0;turnNPC(n);return}
+    if(n.fleeOut&&inB>=0){
+      const b=buildings[inB];
+      const d=doorAt(b.doorX,b.doorY);
+      if(d&&d.state===0&&dist(n.x,n.y,d.tx*TILE+16,d.ty*TILE+16)<40)openDoor(d,true);
+      ensurePath(n,'out',b.doorX*TILE+16,(b.doorY+2)*TILE);
+      if(followPath(n,dt,1.05))return;
+    }else if(n.fleeOut){n.fleeOut=false;n.turning=Math.min(n.turning,1.5+R()*3)}
+    n.moveT-=dt;if(n.moveT<=0){n.moveT=1+R();n.wa=R()*7}
+    n.x+=Math.cos(n.wa||0)*26*dt;n.y+=Math.sin(n.wa||0)*26*dt;n.dir=n.wa||0;collide(n);
+    return;
+  }
   if(n.resting){n.dir=1.6;return} // лежит (больница/дом)
   if(n.oblivious&&!n.oblivious.dead&&!n.bitten){ // сценарная жертва: стоит в наушниках
     n.dir+=Math.sin(worldT)*.002;return}
@@ -1489,6 +1592,36 @@ function resBrain(n,dt){
     n.x+=Math.cos(a)*sp*dt;n.y+=Math.sin(a)*sp*dt;n.dir=a;collide(n);
     return;
   }
+  // курьер: развозит заказы по адресам весь рабочий день
+  if(n.job&&n.job.type==='courier'&&day<2&&!n.panic){
+    const h=hour();
+    if(h>=n.workS&&h<n.workE){
+      n.courT=(n.courT||0)-dt;
+      if(!n.path&&n.courT<=0){
+        const tgt=pick(buildings.filter(b=>['house','flat','cafe','market','office'].includes(b.type)));
+        ensurePath(n,'del'+((Math.random()*9999)|0),tgt.doorX*TILE+16,(tgt.doorY+2)*TILE);
+        n.courT=6+R()*8;
+      }
+      if(followPath(n,dt,1.1))return;
+      n.dir+=0;return;
+    }
+  }
+  // водители такси и автобусов: смена за рулём
+  if(n.job&&(n.job.type==='taxi'||n.job.type==='bus')&&day===1&&!n.panic){
+    const h=hour();
+    if(h>=n.workS&&h<n.workE){
+      if(!NODES)NODES=roadNodes();
+      let nd=NODES[0],bd=1e9;
+      for(const o of NODES){const d=dist(n.x,n.y,o.x,o.y);if(d<bd){bd=d;nd=o}}
+      if(bd<70){
+        const v=spawnVehicle(n.job.type==='taxi'?'taxi':'bus');
+        v.x=n.x;v.y=n.y;v.owner=n;n.inCar=true;n.cab=v;
+        return;
+      }
+      ensurePath(n,'depot',nd.x,nd.y);
+      if(followPath(n,dt,.9))return;
+    }
+  }
   // РУТИНА живого города
   const want=desiredSpot(n);
   if(want){
@@ -1523,19 +1656,23 @@ function resBrain(n,dt){
 }
 function milBrain(n,dt){
   if(n.bitten){n.bitten-=dt;if(n.bitten<=0){turnNPC(n);return}}
-  n.shootT-=dt;n.think-=dt;
+  n.shootT-=dt;n.think-=dt;n.atkT-=dt;
+  if(n.raidT!==undefined&&n.raidT>0)n.raidT-=dt;
   if(n.think<=0){
     n.think=.25;
-    let best=null,bd=n.police?1e9:340;
+    // зомби — приоритетная цель
+    let best=null,bd=n.police?1e9:320;
     for(const z of npcs){if(z.dead||(z.kind!=='inf'&&z.kind!=='milinf'))continue;
       const d=dist(n.x,n.y,z.x,z.y);if(d<bd&&los(n.x,n.y,z.x,z.y)){best=z;bd=d}}
-    if(!P.dead){
+    // игрок: у моста — никого не подпускают; грязный/ночью — шанс ошибки
+    if(!P.dead&&!best){
       const pd=dist(n.x,n.y,P.x,P.y);
-      const nearWire=P.x<5.5*TILE||P.x>W-5.5*TILE||P.y<5.5*TILE||P.y>H-5.5*TILE;
-      const hostileP=(P.wanted)||(quarantined&&nearWire)||(n.squad&&pd<260);
-      if(hostileP&&pd<(n.police?520:360)&&los(n.x,n.y,P.x,P.y)){
-        if(!n.warned&&!P.wanted&&!n.squad){n.warned=true;msg('ВОЕННЫЙ: «СТОЙ! НАЗАД, ИЛИ ОТКРЫВАЮ ОГОНЬ!»','bad');sfx.click();}
-        else if(pd<bd||!best){best=P;bd=pd}
+      const nearBridge=bridge&&dist(P.x,P.y,bridge.cx,bridge.barY)<180;
+      const mistake=(P.dirty||nightF()>.5)&&R()<.35;
+      if(pd<300&&los(n.x,n.y,P.x,P.y)&&(P.wanted||nearBridge||mistake)){
+        if(!n.warned&&!P.wanted){n.warned=true;
+          msg(nearBridge?'ВОЕННЫЙ: «МОСТ ЗАКРЫТ! НАЗАД, ИЛИ ОТКРЫВАЮ ОГОНЬ!»':'ВОЕННЫЙ: «СТОЯТЬ! НЕ ДВИГАТЬСЯ!»','bad');sfx.click()}
+        else best=P;
       }
     }
     n.tgt=best;
@@ -1547,7 +1684,10 @@ function milBrain(n,dt){
       shootRay(n.x,n.y,n.dir+((R()-.5)*.14),{dmg:34,noise:520,mil:true},n);
     }
     const d=dist(n.x,n.y,t.x,t.y);
-    if(d<50){
+    if(d<90&&!n.squad){ // стараются не подходить близко — отступают
+      mx=-Math.cos(n.dir)*.7;my=-Math.sin(n.dir)*.7;
+    }
+    if(d<44){
       if(n.atkT<=0){n.atkT=.8;
         const zroll=t.stats?t.stats.str+R()*4:5, mroll=n.stats.str+R()*4;
         if(zroll>mroll&&t.kind&&(t.kind==='inf'||t.kind==='milinf')){
@@ -1560,13 +1700,22 @@ function milBrain(n,dt){
   }else if(n.hunt===P&&!P.dead){
     const a=Math.atan2(P.y-n.y,P.x-n.x);mx=Math.cos(a);my=Math.sin(a);n.dir=a;
   }else if(n.squad){
-    n.moveT-=dt;
-    if(dist(n.x,n.y,n.tx,n.ty)<40||n.moveT<=0){n.moveT=10;n.tx=W/2+ri(-600,600);n.ty=H/2+ri(-400,400)}
-    const a=Math.atan2(n.ty-n.y,n.tx-n.x);mx=Math.cos(a)*.8;my=Math.sin(a)*.8;n.dir=a;
-  }else if(n.post&&dist(n.x,n.y,n.post.x,n.post.y)>26){
+    // рейд: зачистка города, затем назад на мост
+    if(n.raidT!==undefined&&n.raidT<=0){
+      if(bridge&&dist(n.x,n.y,bridge.cx,bridge.barY+80)<70){n.dead=true;return} // ушёл за мост
+      const a=Math.atan2(bridge.barY+80-n.y,bridge.cx-n.x);mx=Math.cos(a)*.9;my=Math.sin(a)*.9;n.dir=a;
+    }else{
+      n.moveT-=dt;
+      if(dist(n.x,n.y,n.tx,n.ty)<40||n.moveT<=0){n.moveT=10;n.tx=W/2+ri(-600,600);n.ty=H/2+ri(-400,400)}
+      const a=Math.atan2(n.ty-n.y,n.tx-n.x);mx=Math.cos(a)*.8;my=Math.sin(a)*.8;n.dir=a;
+    }
+  }else if(n.patrol){
+    const wp=n.patrol[n.pi||0];
+    if(dist(n.x,n.y,wp.x,wp.y)<34)n.pi=((n.pi||0)+1)%n.patrol.length;
+    else{const a=Math.atan2(wp.y-n.y,wp.x-n.x);mx=Math.cos(a)*.5;my=Math.sin(a)*.5;n.dir=a}
+  }else if(n.post&&dist(n.x,n.y,n.post.x,n.post.y)>16){
     const a=Math.atan2(n.post.y-n.y,n.post.x-n.x);mx=Math.cos(a)*.6;my=Math.sin(a)*.6;n.dir=a;
   }
-  n.atkT-=dt;
   const sp=npcSpeed(n);
   n.x+=mx*sp*dt;n.y+=my*sp*dt;collide(n);
 }
@@ -1633,7 +1782,7 @@ function playerAttack(){
       if(da<1.1){
         n.hp-=wd.dmg*dmgMul;hit=true;
         knockback(n,a,16);
-        if(n.kind==='inf'||n.kind==='milinf'){n.aggro=true;n.stun=Math.max(n.stun,.25);spray(n.x,n.y,'#5a7a3a',7)}
+        if(n.kind==='inf'||n.kind==='milinf'){n.aggro=true;n.stun=Math.max(n.stun,.25);spray(n.x,n.y,'#5a7a3a',7);P.dirty=true}
         else{spray(n.x,n.y,'#a02020',7);if(n.kind==='res')n.panic=9;if(n.kind==='mil'&&!P.wanted){P.wanted=true;msg('Военные объявили вас врагом!','bad')}}
         if(n.hp<=0)killNPC(n,'player');
       }
@@ -1682,7 +1831,7 @@ function restorePlayer(s){
 /* ============================================================
    ТРАНСПОРТ: машины, такси, автобусы
    ============================================================ */
-const VCOL={car:['#5a3b3b','#3b4a5a','#4a4a4a','#3b5a46','#775','#446'],taxi:['#c9a92b'],bus:['#3e6a8a'],police:['#2e3e5e']};
+const VCOL={car:['#5a3b3b','#3b4a5a','#4a4a4a','#3b5a46','#775','#446'],taxi:['#c9a92b'],bus:['#3e6a8a'],police:['#2e3e5e'],ambulance:['#e8e8ea']};
 function roadNodes(){const out=[];for(const v of ROADV)for(const h of ROADH)out.push({x:(v+2)*TILE,y:(h+2)*TILE,v,h});return out}
 let NODES=null;
 function spawnVehicle(type){
@@ -1704,17 +1853,53 @@ function pickNextNode(veh){
   veh.prevNode=cur;
   veh.node=pick(opts.length?opts:cand);
 }
-function nearestGatePos(x,y){let best=gates[0],bd=1e9;
-  for(const g of gates){const d=dist(x,y,g.x,g.y);if(d<bd){bd=d;best=g}}return best}
+function callAmbulance(victim){
+  if(day>1||victim.ambCalled)return;
+  victim.ambCalled=true;
+  const hosp=buildings.find(b=>b.type==='hosp');if(!hosp)return;
+  const v=spawnVehicle('ambulance');
+  v.x=hosp.doorX*TILE+16;v.y=(hosp.doorY+2)*TILE;
+  v.mission={phase:0,victim,hosp};v.max=270;
+}
 function updateVehicle(veh,dt){
+  // шофёр за рулём: связь и конец смены
+  if(veh.owner&&!veh.parked){
+    const o=veh.owner;o.x=veh.x;o.y=veh.y;
+    if(day>=2||hour()>=o.workE||o.dead||o.bitten){
+      veh.parked=true;o.inCar=false;o.cab=null;return;
+    }
+  }
   if(veh.parked)return;
   if(veh.stopT>0){veh.stopT-=dt;veh.v=0;return}
+  // скорая: миссия «забрать укушенного»
+  if(veh.mission){
+    const m=veh.mission,vic=m.victim;
+    let tx2,ty2;
+    if(m.phase===0){
+      if(vic.dead||vic.kind!=='res'){veh.mission=null;veh.life=8;return}
+      tx2=vic.x;ty2=vic.y;
+      if(dist(veh.x,veh.y,tx2,ty2)<70){
+        m.phase=1;veh.stopT=1.6;
+        vic.inCar=true;vic.cab=veh;vic.path=null;
+        return;
+      }
+    }else{
+      tx2=m.hosp.doorX*TILE+16;ty2=(m.hosp.doorY+3)*TILE;
+      if(dist(veh.x,veh.y,tx2,ty2)<110){
+        vic.inCar=false;vic.cab=null;
+        const fb=freeHospBed();
+        if(fb){vic.x=fb.bed.tx*TILE+16;vic.y=fb.bed.ty*TILE+26;vic.resting=true}
+        else{vic.x=veh.x;vic.y=veh.y}
+        veh.mission=null;veh.life=6;veh.parked=true;return;
+      }
+    }
+    const a2=Math.atan2(ty2-veh.y,tx2-veh.x);
+    veh.ang=a2;veh.v=Math.min(veh.max,veh.v+260*dt);
+    veh.x+=Math.cos(a2)*veh.v*dt;veh.y+=Math.sin(a2)*veh.v*dt;
+    return;
+  }
   let tx,ty;
-  if(veh.flee){
-    const g=nearestGatePos(veh.x,veh.y);
-    tx=g.x-(g.vert?0:Math.sign(g.x-W/2)*90);ty=g.y-(g.vert?Math.sign(g.y-H/2)*90:0);
-    if(dist(veh.x,veh.y,tx,ty)<70){veh.parked=true;return}
-  }else{
+  {
     tx=veh.node.x;ty=veh.node.y;
     if(dist(veh.x,veh.y,tx,ty)<26)pickNextNode(veh);
     tx=veh.node.x;ty=veh.node.y;
@@ -1758,16 +1943,17 @@ function updateVehicle(veh,dt){
 let vehSpawnT=0;
 function updateTraffic(dt){
   for(const v of vehicles)updateVehicle(v,dt);
-  if(quarantined)return;
+  if(day>=2)return; // после первой ночи город замирает
   const h=hour();
   if(h<6.5||h>22.5)return;
   vehSpawnT-=dt;
   if(vehSpawnT>0)return;
   vehSpawnT=2+R()*3;
-  const caps=day===1?{car:8,taxi:3,bus:2}:{car:3,taxi:1,bus:0};
-  const cnt={car:0,taxi:0,bus:0};
-  for(const v of vehicles)if(!v.parked)cnt[v.type]=(cnt[v.type]||0)+1;
-  for(const t of ['bus','taxi','car'])if((cnt[t]||0)<caps[t]){spawnVehicle(t);break}
+  // такси и автобусы водят жители-водители; фоновые — только личные машины
+  const cap=8;
+  let cnt=0;
+  for(const v of vehicles)if(!v.parked&&v.type==='car')cnt++;
+  if(cnt<cap)spawnVehicle('car');
 }
 
 /* ============================================================
@@ -1798,18 +1984,15 @@ function doTrade(n){
    КАРАНТИН (день 2)
    ============================================================ */
 function applyQuarantine(silent){
+  // день 3: армия занимает мост; на вывеске «tomorrow» перечёркнуто — «NEVER»
   if(quarantined)return;
   quarantined=true;
-  // проволока по периметру
-  for(let x=2;x<MW-2;x++){solid[idx(x,2)]=1;solid[idx(x,MH-3)]=1}
-  for(let y=2;y<MH-2;y++){solid[idx(2,y)]=1;solid[idx(MW-3,y)]=1}
-  paintWire();
   spawnMilitary();
-  for(const v of vehicles)if(!v.parked)v.flee=true;
+  for(const v of vehicles)if(!v.parked)v.parked=true;
   if(!silent){
     sfx.siren();
-    ticker('⛔ ПРАВИТЕЛЬСТВЕННЫЙ КАРАНТИН. Город оцеплен войсками. Попытка покинуть периметр — огонь на поражение. Ждите указаний.');
-    msg('Военные растянули колючую проволоку по периметру. Город закрыт.','bad');
+    ticker('📻 Военная волна: «Мост взят под охрану. Периметр патрулируется. Никто не входит и не выходит».');
+    msg('На мосту военные. На вывеске «tomorrow» перечёркнуто красным. Рядом выведено: «NEVER».','bad');
   }
 }
 
@@ -1821,26 +2004,28 @@ function scheduleDay(){
   const at=(h,type,data)=>events.push({at:h,type,data,fired:false});
   if(day===1){
     at(6.2,'msg',{t:'Понедельник. Обычное утро: город просыпается, вам к 9:00 в офис (отмечен на карте).',c:''});
-    at(6.35,'msg',{t:'У вас '+(P?P.money:1500)+'₽ — можно заехать в магазины. Мало ли что.',c:''});
-    at(9.5,'ticker',{t:'Новости: в городской больнице наплыв пациентов с «агрессивной лихорадкой». Врачи призывают не паниковать. Трасса на юг перекрыта из-за аварии.'});
+    at(6.35,'msg',{t:'У вас '+(P?P.money:1500)+'₽ — можно заехать в магазины. Мост на юге всё ещё «откроют завтра».',c:''});
+    at(9.5,'citynews',{t:'В больнице наплыв пациентов с «агрессивной лихорадкой». Врачи призывают не паниковать. Мост, как обычно, «will open tomorrow».'});
     at(13+R()*2,'pzero',{});
-    at(17.5,'ticker',{t:'⚠ Полиция застрелила горожанина, покусавшего прохожих. Очевидцы говорят, он «не падал после выстрелов». Ведётся проверка.'});
-    at(20,'ticker',{t:'⚠ СРОЧНО: множественные нападения на улицах. Полиция просит горожан не выходить из домов. Что-то происходит...'});
+    at(17.5,'citynews',{t:'⚠ Полиция застрелила горожанина, покусавшего прохожих. Очевидцы: «он не падал после выстрелов». Комментариев нет.'});
+    at(20,'citynews',{t:'⚠ СРОЧНО: множественные нападения по всему городу. Не выходите из домов, запирайте двери, двигайте мебель к дверям!'});
     at(22,'siren',{});
+    // ночная волна: 20–50% населения обратится до утра
+    for(let k=0;k<8;k++)at(22.4+k*.85,'spread',{});
   }
   if(day===2){
-    at(8,'quarantine',{});
-    at(10,'ticker',{t:'⛔ Армия занимает периметр. Все выезды перекрыты колючей проволокой. Карантин без сроков.'});
-    at(16,'ticker',{t:'⚠ Связь с центром города потеряна. Заражённые нападают на людей. НЕ ПОКИДАЙТЕ УКРЫТИЯ.'});
+    at(7,'citynews',{t:'Мы живы и ведём паблик из подсобки. Улицы кишат ИМИ. Кто может — баррикадируйтесь. Интернет пропадает...'});
+    at(12,'citynews',{t:'Связи с полицией нет. Больница переполнена. Если читаете это — не открывайте дверь никому, кто не отвечает голосом.'});
+    at(19,'citynews',{t:'Ночью будет хуже. Погасите свет, забейте окна. Храни нас всех бог.'});
   }
+  if(day===3)at(8,'army',{});
   if(day>=3){
-    const pool=['horde','drop','rain'];
-    if(day>=3)pool.push('airstrike','airstrike');
-    if(day>=4)pool.push('sweep','blackout');
+    const pool=['horde','drop','rain','raid'];
+    if(day>=4)pool.push('airstrike','blackout','raid');
     if(day>=5)pool.push('screamer');
     const n=day>=5?2:1;
-    for(let i=0;i<n;i++)at(8+R()*13,pick(pool),{});
-    if(day===3)at(9,'ticker',{t:'Военные: город на полном карантине. Любая попытка прорыва периметра пресекается огнём на поражение.'});
+    for(let i=0;i<n;i++)at(9+R()*12,pick(pool),{});
+    if(day===3)at(10,'citynews',{t:'Военные на мосту. На вывеске стройки кто-то зачеркнул «tomorrow» и написал «NEVER». Мы в клетке.'});
   }
   events.sort((a,b)=>a.at-b.at);
 }
@@ -1860,30 +2045,39 @@ function fireEvent(e){
     case 'msg':msg(e.data.t,e.data.c);break;
     case 'ticker':ticker(e.data.t);break;
     case 'siren':sfx.siren();msg('Вдалеке воют сирены...','bad');break;
-    case 'quarantine':applyQuarantine(false);break;
-    case 'pzero':{
-      // нулевой пациент: первый зомби — медленный
-      const outd=npcs.filter(n=>n.kind==='res'&&!n.dead&&bmap[idx((n.x/TILE)|0,(n.y/TILE)|0)]<0
-        &&dist(n.x,n.y,P.x,P.y)>250);
-      const v=outd.length?pick(outd):null;
-      if(!v)break;
-      turnNPC(v);
-      v.stats.spd=2;v.stats.int=3;v.stats.inf=7;v.patientZero=true;
-      pzDone=true;
-      // первая жертва не замечает опасности (сценарный первый укус)
-      let vic=null,vd=1e9;
-      for(const r2 of npcs){if(r2.kind!=='res'||r2.dead||r2===v)continue;
-        if(bmap[idx((r2.x/TILE)|0,(r2.y/TILE)|0)]>=0)continue; // только на улице
-        const d2=dist(r2.x,r2.y,v.x,v.y);if(d2<vd){vd=d2;vic=r2}}
-      if(vic){
-        // зомби выходит из подворотни рядом с жертвой
-        let placed=false;
-        for(let t2=0;t2<24;t2++){const a=R()*7,px2=vic.x+Math.cos(a)*70,py2=vic.y+Math.sin(a)*70;
-          if(!isSolid((px2/TILE)|0,(py2/TILE)|0)&&los(px2,py2,vic.x,vic.y)){v.x=px2;v.y=py2;placed=true;break}}
-        if(!placed){v.x=vic.x+40;v.y=vic.y}
-        vic.oblivious=v;v.state='chase';v.tgt=vic;
+    case 'citynews':cityNews(e.data.t);break;
+    case 'army':applyQuarantine(false);break;
+    case 'spread':{
+      // ночная волна: 20–50% населения обращается до утра второго дня
+      const resAll=npcs.filter(n=>n.kind==='res'&&!n.dead&&!n.turning&&!n.inCar);
+      const infC=npcs.filter(n=>(n.kind==='inf'||n.kind==='milinf')&&!n.dead).length;
+      const total=resAll.length+infC;
+      const remain=events.filter(e2=>!e2.fired&&e2.type==='spread').length+1;
+      const need=Math.max(0,Math.round(total*nightSurgeFrac)-infC);
+      let k=Math.ceil(need/remain);
+      const far=resAll.filter(n=>dist(n.x,n.y,P.x,P.y)>260);
+      const poolV=(far.length?far:resAll).slice();
+      for(let i=0;i<k&&poolV.length;i++){
+        const v=poolV.splice((R()*poolV.length)|0,1)[0];
+        const inB=bmap[idx((v.x/TILE)|0,(v.y/TILE)|0)];
+        v.turning=6+R()*10;v.fleeOut=inB>=0;v.panic=0;v.path=null;v.resting=false;v.escort=null;
       }
-      // полиция выезжает чуть позже
+      break;}
+    case 'pzero':{
+      // нулевой пациент: совершенно случайный житель — где бы он ни был
+      const cand=npcs.filter(n=>n.kind==='res'&&!n.dead&&!n.inCar&&dist(n.x,n.y,P.x,P.y)>220);
+      const v=cand.length?pick(cand):null;
+      if(!v)break;
+      pzDone=true;v.patientZero=true;v.stats.hlt=1;
+      const inB=bmap[idx((v.x/TILE)|0,(v.y/TILE)|0)];
+      const hosp=buildings.find(b=>b.type==='hosp');
+      if(inB>=0&&hosp&&inB===hosp.id){
+        turnNPC(v); // обратился прямо в больнице (пациент или медик)
+      }else if(inB>=0){
+        v.turning=14+R()*10;v.fleeOut=true; // выбежит на улицу и обратится там
+      }else{
+        v.turning=5+R()*5; // курьер, таксист или прохожий — обратится на улице
+      }
       events.push({at:(6+tod*24)+.8,type:'pzcops',data:{pz:v},fired:false});
       break;}
     case 'pzcops':{
@@ -1909,10 +2103,13 @@ function fireEvent(e){
       if(hasItem('radio'))ticker(`🚨 ВОЕННОЕ РАДИО: через минуту ВВС наносят удар по сектору «${dirn}». НЕМЕДЛЕННО ПОКИНЬТЕ РАЙОН — смотрите карту!`);
       else msg('Слышны сирены и гул самолётов... (радио сообщило бы, где будет удар)','bad');
       break;}
-    case 'sweep':{
-      const g=pick(gates);
-      for(let i=0;i<4;i++){const m=spawnNPC('mil',g.x+ri(-40,40),g.y+ri(-40,40));m.squad=true;m.tx=W/2;m.ty=H/2;m.moveT=10}
-      if(hasItem('radio'))ticker('⚠ Радио: зачистка. Военный патруль вошёл в город. Стреляют во всё, что движется.');
+    case 'raid':{
+      // рейд с моста: военных мало, и они часто гибнут
+      for(let i=0;i<ri(4,6);i++){
+        const m=spawnNPC('mil',bridge.cx+ri(-44,44),bridge.barY-50-ri(0,50));
+        m.squad=true;m.raidT=70+R()*45;m.tx=W/2+ri(-500,500);m.ty=H/2+ri(-320,320);m.moveT=8;
+      }
+      if(hasItem('radio'))ticker('📻 Военная волна: «Рейдовая группа входит в город. Гражданским — укрыться и не приближаться».');
       sfx.siren();break;}
     case 'drop':{
       const spots=buildings.filter(b=>b.type==='office'||b.type==='hosp');
@@ -2141,12 +2338,7 @@ function findInteract(){
       return null;
     }
   }
-  const wd=Math.min(P.x-80,W-80-P.x,P.y-80,H-80-P.y);
-  if(wd<46){
-    if(!quarantined)return{k:'cordon'};
-    if(hasItem('cutters'))return{k:'wire'};
-    return{k:'wireNo'};
-  }
+  if(bridge&&dist(P.x,P.y,bridge.signX,bridge.signY)<70)return{k:'sign'};
   return null;
 }
 /* ---------- Толкание мебели (G) ---------- */
@@ -2213,16 +2405,14 @@ function tryInteract(){
       for(const n of npcs){if(!n.dead&&(n.kind==='inf'||n.kind==='milinf')&&dist(P.x,P.y,n.x,n.y)<300){danger=true;break}}
       if(danger){msg('Слишком опасно: они рядом. Сначала разберитесь с угрозой.','bad');break}
       P.ch={label:'Засыпаем...',t:0,dur:1.5,fn:()=>{
-        P.hp=Math.min(P.maxhp,P.hp+15);P.stam=100;
+        P.hp=Math.min(P.maxhp,P.hp+15);P.stam=100;P.dirty=false;
         P.food=Math.max(0,P.food-12);P.water=Math.max(0,P.water-16);
-        msg('Вы проспали до рассвета.','good');nextDay();}};
+        msg('Вы проспали до рассвета и переоделись в чистое.','good');nextDay();}};
       break}
-    case 'cordon':msg('Полицейский кордон: «Трасса перекрыта, возвращайтесь домой». Уехать не выйдет.');break;
-    case 'wire':{
-      const md=nearestMil(P.x,P.y);
-      P.ch={label:md<380?'Режем проволоку (вас видят!)...':'Режем проволоку...',t:0,dur:5,
-        fn:()=>winGame('escape')};break}
-    case 'wireNo':msg('Колючая проволока. Нужны кусачки (хозтовары).');break;
+    case 'sign':
+      msg(day>=3?'Вывеска: «BRIDGE CLOSED — WILL OPEN TOMORROW, SORRY!». Слово «TOMORROW» перечёркнуто красной краской. Рядом выведено: «NEVER».'
+        :'Вывеска: «BRIDGE CLOSED — WILL OPEN TOMORROW, SORRY!»');
+      break;
   }
 }
 function promptText(){
@@ -2245,9 +2435,7 @@ function promptText(){
     case 'barricade':t=`<b>E</b> — забаррикадировать (2 доски)`;break;
     case 'unbar':t=`<b>E</b> — разобрать баррикаду`;break;
     case 'bed':t=`<b>E</b> — спать до рассвета`;break;
-    case 'cordon':t=`Кордон. Выезд закрыт «из-за аварии»`;break;
-    case 'wire':t=`<b>E</b> — резать проволоку ✂ (военные не должны видеть)`;break;
-    case 'wireNo':t=`Периметр. Нужны <b>кусачки</b>`;break;
+    case 'sign':t=`<b>E</b> — прочитать вывеску`;break;
   }
   const pc=findPushable();
   if(pc){const h=`<b>G</b> — толкнуть ${FURN_N[pc.type]}`;t=t?t+' &nbsp;·&nbsp; '+h:h}
@@ -2323,9 +2511,19 @@ function prerenderGround(){
       case G_FLOOR:{const b=buildings[bmap[idx(tx,ty)]];c=b?floorStyle(b,hn):'#555';break}
       case G_SAND:c=`rgb(${168+hn*14|0},${150+hn*12|0},${106+hn*10|0})`;break;
       case G_WATER:c=`rgb(${24+hn*6|0},${52+hn*8|0},${78+hn*10|0})`;break;
+      case G_BRIDGE:c=`rgb(${106+hn*8|0},${90+hn*7|0},${64+hn*6|0})`;break;
+      case G_ROCK:c=`rgb(${41+hn*12|0},${43+hn*12|0},${48+hn*12|0})`;break;
       default:c=`rgb(${52+hn*14|0},${70+hn*16|0},${48+hn*12|0})`;
     }
     g.fillStyle=c;g.fillRect(x,y,TILE,TILE);
+    if(gr===G_BRIDGE){ // дощатый настил
+      g.strokeStyle='rgba(0,0,0,.25)';
+      for(let k=4;k<TILE;k+=8){g.beginPath();g.moveTo(x,y+k);g.lineTo(x+TILE,y+k);g.stroke()}
+    }
+    if(gr===G_ROCK){ // скальные грани
+      g.fillStyle=`rgba(255,255,255,${.04+hn*.05})`;g.fillRect(x+((hn*61)%20|0),y+((hn*37)%20|0),9,3);
+      g.fillStyle='rgba(0,0,0,.28)';g.fillRect(x+((hn*97)%22|0),y+((hn*53)%22|0),7,4);
+    }
     if(gr===G_ROAD){
       if(hn>.55){g.fillStyle='rgba(0,0,0,.10)';g.fillRect(x+((hn*97)%22|0),y+((hn*57)%22|0),5+hn*6,4)}
       if(hn<.05){g.strokeStyle='rgba(0,0,0,.25)';g.beginPath();g.moveTo(x+3,y+6+((hn*400)%20|0));
@@ -2395,7 +2593,16 @@ function prerenderGround(){
     g.fillStyle='#888';g.fillRect(bs.x+14,bs.y-6,3,10);
     g.fillStyle='#d9c96a';g.fillRect(bs.x+12,bs.y-12,8,6);
   }
-  for(const gt of gates)paintRoadblock(g,gt);
+  // перила моста
+  if(bridge){
+    const bx2=ROADV[2]*TILE,ry=(MH-6)*TILE;
+    g.strokeStyle='#5a4a34';g.lineWidth=4;
+    g.beginPath();g.moveTo(bx2+2,ry);g.lineTo(bx2+2,ry+4*TILE);g.stroke();
+    g.beginPath();g.moveTo(bx2+4*TILE-2,ry);g.lineTo(bx2+4*TILE-2,ry+4*TILE);g.stroke();
+    g.lineWidth=1;
+    g.fillStyle='#6a5a40';
+    for(let k=0;k<5;k++){g.fillRect(bx2,ry+k*TILE-2,6,6);g.fillRect(bx2+4*TILE-6,ry+k*TILE-2,6,6)}
+  }
   for(const l of lamps){
     g.fillStyle='rgba(0,0,0,.35)';g.beginPath();g.ellipse(l.x+2,l.y+2,5,3,0,0,7);g.fill();
     g.fillStyle='#3a3d42';g.beginPath();g.arc(l.x,l.y,3.5,0,7);g.fill();
@@ -2434,6 +2641,13 @@ function paintProp(g,p){
     g.fillStyle='#6a4e30';g.fillRect(p.x-12,p.y-5,24,10);
     g.strokeStyle='rgba(0,0,0,.3)';
     for(let i=0;i<3;i++){g.beginPath();g.moveTo(p.x-12,p.y-3+i*3);g.lineTo(p.x+12,p.y-3+i*3);g.stroke()}
+  }else if(p.t==='fence'){ // стройзабор на мосту
+    g.fillStyle='rgba(0,0,0,.3)';g.fillRect(p.x-62,p.y-2,126,8);
+    for(let k=-2;k<=2;k++){
+      g.fillStyle='#c9772b';g.fillRect(p.x+k*26-11,p.y-8,22,12);
+      g.fillStyle='#e8e4da';g.fillRect(p.x+k*26-11,p.y-8,22,4);
+      g.fillStyle='#8a8a8a';g.fillRect(p.x+k*26-1,p.y+4,3,6);
+    }
   }else if(p.t==='firetruck'){
     const x=p.x,y=p.y,w=4*TILE,h=2*TILE;
     g.fillStyle='rgba(0,0,0,.4)';roundRect(g,x+5,y+7,w-8,h-10,8);g.fill();
@@ -2597,6 +2811,8 @@ function prerenderMinimap(){
     else if(gr===G_PARK)m.fillStyle='#243522';
     else if(gr===G_SAND)m.fillStyle='#5a5140';
     else if(gr===G_WATER)m.fillStyle='#1e3a52';
+    else if(gr===G_BRIDGE)m.fillStyle='#6a5a3f';
+    else if(gr===G_ROCK)m.fillStyle='#22252a';
     else continue;
     m.fillRect(tx*TILE*sx,ty*TILE*sy,TILE*sx+1,TILE*sy+1);
   }
@@ -2604,7 +2820,6 @@ function prerenderMinimap(){
     m.fillStyle=b.type==='home'?'#c9a94b':b.type==='hosp'?'#7a3030':'#2a2d35';
     m.fillRect(b.tx*TILE*sx,b.ty*TILE*sy,b.tw*TILE*sx,b.th*TILE*sy);
   }
-  m.strokeStyle='#a03030';m.lineWidth=2;m.strokeRect(2.5*TILE*sx,2.5*TILE*sy,(W-5*TILE)*sx,(H-5*TILE)*sy);
 }
 
 /* ============================================================
@@ -2638,72 +2853,80 @@ function drawWallTile(tx,ty){
   const ew=wallish(tx-1,ty)||wallish(tx+1,ty);
   const ns=wallish(tx,ty-1)||wallish(tx,ty+1);
   const isWin=b.windows&&b.windows.some(w=>w.tx===tx&&w.ty===ty);
+  // грань прижата к краю тайла: юг для EW-стен (север. периметр — к северу),
+  // запад для NS-стен (вост. периметр — к востоку). Крышка — вдоль грани.
+  const northRow=ty===b.ty&&ext;
+  const eastCol=tx===b.tx+b.tw-1&&ext;
+  const yl=northRow?y0+3:y1-3;
+  const xl=eastCol?x1-3:x0+3;
   // прозрачность только если плита ПОЛНОСТЬЮ скрывает героя
   let alpha=1;
   if((tx+ty)*TILE+30>pDepthG&&pBoxG){
     if(ew||!ns){
-      const A=S(x0,yc+6),B=S(x1,yc+6);
+      const A=S(x0,yl),B=S(x1,yl);
       if(occludes(Math.min(A[0],B[0]),Math.min(A[1],B[1])-H,Math.max(A[0],B[0]),Math.max(A[1],B[1])))alpha=.3;
     }
     if(alpha===1&&ns){
-      const A=S(xc-6,y0),B=S(xc-6,y1);
+      const A=S(xl,y0),B=S(xl,y1);
       if(occludes(Math.min(A[0],B[0]),Math.min(A[1],B[1])-H,Math.max(A[0],B[0]),Math.max(A[1],B[1])))alpha=.3;
     }
   }
   ctx.globalAlpha=alpha;
   if(ew||!ns){
-    // плита восток-запад: видна южная грань
-    fillPoly(facePts(x0,yc+6,x1,yc+6,0,H),fc);
-    fillPoly(facePts(x0,yc+6,x1,yc+6,0,7*K),'rgba(0,0,0,.25)');
+    fillPoly(facePts(x0,yl,x1,yl,0,H),fc);
+    fillPoly(facePts(x0,yl,x1,yl,0,6*K),'rgba(0,0,0,.25)');
     if(isWin&&!door){
       const wx0=x0+7,wx1=x1-7;
-      fillPoly(facePts(wx0,yc+6,wx1,yc+6,14*K,34*K),'#16202c');
-      fillPoly(facePts(wx0,yc+6,wx0+7,yc+6,26*K,33*K),'rgba(150,190,225,.4)');
+      fillPoly(facePts(wx0,yl,wx1,yl,14*K,34*K),'#16202c');
+      fillPoly(facePts(wx0,yl,wx0+7,yl,26*K,33*K),'rgba(150,190,225,.4)');
       ctx.strokeStyle='rgba(235,230,220,.6)';ctx.lineWidth=1.5*K;
-      const fp=facePts(wx0,yc+6,wx1,yc+6,14*K,34*K);
+      const fp=facePts(wx0,yl,wx1,yl,14*K,34*K);
       ctx.beginPath();ctx.moveTo(fp[0][0],fp[0][1]);ctx.lineTo(fp[1][0],fp[1][1]);
       ctx.lineTo(fp[2][0],fp[2][1]);ctx.lineTo(fp[3][0],fp[3][1]);ctx.closePath();ctx.stroke();
-      const mm=facePts((wx0+wx1)/2,yc+6,(wx0+wx1)/2,yc+6,14*K,34*K);
+      const mm=facePts((wx0+wx1)/2,yl,(wx0+wx1)/2,yl,14*K,34*K);
       ctx.beginPath();ctx.moveTo(mm[0][0],mm[0][1]);ctx.lineTo(mm[3][0],mm[3][1]);ctx.stroke();
       ctx.lineWidth=1;
-      fillPoly(facePts(wx0-2,yc+6,wx1+2,yc+6,12*K,14*K),'rgba(255,255,255,.35)');
+      fillPoly(facePts(wx0-2,yl,wx1+2,yl,12*K,14*K),'rgba(255,255,255,.35)');
     }
     if(door){
       const dx0=x0+5,dx1=x1-5;
       if(door.state===0){
         const col=door.barricaded?'#7a6242':door.locked?'#4a3423':'#6a4a2a';
-        fillPoly(facePts(dx0,yc+6,dx1,yc+6,0,H-8*K),col);
-        fillPoly(facePts(dx0,yc+6,dx1,yc+6,H-11*K,H-8*K),'rgba(255,255,255,.15)');
-        fillPoly(facePts(dx1-7,yc+6,dx1-4,yc+6,20*K,24*K),'#c9a94b');
+        fillPoly(facePts(dx0,yl,dx1,yl,0,H-8*K),col);
+        fillPoly(facePts(dx0,yl,dx1,yl,H-11*K,H-8*K),'rgba(255,255,255,.15)');
+        fillPoly(facePts(dx1-7,yl,dx1-4,yl,20*K,24*K),'#c9a94b');
         if(door.barricaded){
           ctx.strokeStyle='#9a8055';ctx.lineWidth=4*K;
-          const p1=facePts(dx0,yc+6,dx1,yc+6,6*K,H-12*K);
+          const p1=facePts(dx0,yl,dx1,yl,6*K,H-12*K);
           ctx.beginPath();ctx.moveTo(p1[0][0],p1[0][1]);ctx.lineTo(p1[2][0],p1[2][1]);
           ctx.moveTo(p1[1][0],p1[1][1]);ctx.lineTo(p1[3][0],p1[3][1]);ctx.stroke();ctx.lineWidth=1;
         }
       }else{
-        fillPoly(facePts(dx0,yc+6,dx1,yc+6,0,H-6*K),'#0f0c12');
-        if(!door.broken)fillPoly(facePts(dx0,yc+6,dx0+4,yc+6,0,H-8*K),'#6a4a2a');
-        else fillPoly(facePts(dx0,yc+6,dx0+9,yc+6,0,8*K),'#3a2c1c');
+        fillPoly(facePts(dx0,yl,dx1,yl,0,H-6*K),'#0f0c12');
+        if(!door.broken)fillPoly(facePts(dx0,yl,dx0+4,yl,0,H-8*K),'#6a4a2a');
+        else fillPoly(facePts(dx0,yl,dx0+9,yl,0,8*K),'#3a2c1c');
       }
     }
-    const tp=[S(x0,yc-6),S(x1,yc-6),S(x1,yc+6),S(x0,yc+6)].map(p=>[p[0],p[1]-H]);
+    // крышка вдоль грани (внутрь здания от периметра)
+    const yA=northRow?yl:yl-10, yB=northRow?yl+10:yl;
+    const tp=[S(x0,yA),S(x1,yA),S(x1,yB),S(x0,yB)].map(p=>[p[0],p[1]-H]);
     fillPoly(tp,'#41444d');
   }
   if(ns){
-    fillPoly(facePts(xc-6,y0,xc-6,y1,0,H),ext?shade(b.roof,10):'#5f5a50');
-    fillPoly(facePts(xc-6,y0,xc-6,y1,0,7*K),'rgba(0,0,0,.3)');
+    fillPoly(facePts(xl,y0,xl,y1,0,H),ext?shade(b.roof,10):'#5f5a50');
+    fillPoly(facePts(xl,y0,xl,y1,0,6*K),'rgba(0,0,0,.3)');
     if(door){
       const dy0=y0+5,dy1=y1-5;
       if(door.state===0){
         const col=door.barricaded?'#6a5236':door.locked?'#3e2c1e':'#5a3e22';
-        fillPoly(facePts(xc-6,dy0,xc-6,dy1,0,H-8*K),col);
-        fillPoly(facePts(xc-6,dy1-8,xc-6,dy1-4,18*K,23*K),'#c9a94b');
+        fillPoly(facePts(xl,dy0,xl,dy1,0,H-8*K),col);
+        fillPoly(facePts(xl,dy1-8,xl,dy1-4,18*K,23*K),'#c9a94b');
       }else{
-        fillPoly(facePts(xc-6,dy0,xc-6,dy1,0,H-6*K),'#0f0c12');
+        fillPoly(facePts(xl,dy0,xl,dy1,0,H-6*K),'#0f0c12');
       }
     }
-    const tp=[S(xc-6,y0),S(xc+6,y0),S(xc+6,y1),S(xc-6,y1)].map(p=>[p[0],p[1]-H]);
+    const xA=eastCol?xl-10:xl, xB=eastCol?xl:xl+10;
+    const tp=[S(xA,y0),S(xB,y0),S(xB,y1),S(xA,y1)].map(p=>[p[0],p[1]-H]);
     fillPoly(tp,'#3c3f47');
   }
   ctx.globalAlpha=1;
@@ -2780,6 +3003,28 @@ function drawTreeIso(t){
   ctx.fillStyle='#3c5f2e';ctx.beginPath();ctx.arc(sx+sway-r*.32,sy-41*K,r*.45,0,7);ctx.fill();
   ctx.globalAlpha=1;
 }
+function drawBridgeSign(){
+  // вывеска стройки моста: EN; с 3-го дня «tomorrow» перечёркнуто, дописано NEVER
+  const K=ISOK;
+  const [sx,sy]=S(bridge.signX,bridge.signY);
+  ctx.save();ctx.translate(sx,sy);ctx.scale(K,K);
+  ctx.fillStyle='rgba(0,0,0,.35)';ctx.beginPath();ctx.ellipse(0,2,10,4,0,0,7);ctx.fill();
+  ctx.strokeStyle='#6a5a40';ctx.lineWidth=3;
+  ctx.beginPath();ctx.moveTo(0,0);ctx.lineTo(0,-28);ctx.stroke();ctx.lineWidth=1;
+  ctx.fillStyle='#ddd6c4';ctx.fillRect(-40,-58,80,30);
+  ctx.strokeStyle='#8a7a5a';ctx.strokeRect(-40,-58,80,30);
+  ctx.fillStyle='#3a3a3a';ctx.font='700 8px Arial';ctx.textAlign='center';
+  ctx.fillText('BRIDGE CLOSED',0,-48);
+  ctx.fillText('WILL OPEN TOMORROW',0,-39);
+  ctx.fillText('SORRY!',0,-31);
+  if(day>=3){
+    ctx.strokeStyle='#c22020';ctx.lineWidth=2.4;
+    ctx.beginPath();ctx.moveTo(6,-43);ctx.lineTo(38,-40);ctx.stroke();ctx.lineWidth=1;
+    ctx.fillStyle='#c22020';ctx.font='900 11px Arial';
+    ctx.save();ctx.rotate(-.06);ctx.fillText('NEVER',18,-22);ctx.restore();
+  }
+  ctx.restore();
+}
 /* ---------- ФИГУРЫ ---------- */
 const RES_COLORS=['#7a5c46','#5c6a7a','#6a7a5c','#7a6a8a','#8a6a5a','#5a7a7a','#94794e'];
 const HAIR=['#3a2c1e','#241a12','#5b4630','#6e6258','#1c1c1e','#7a4a28'];
@@ -2787,9 +3032,15 @@ function npcOutfit(n){
   let body=RES_COLORS[n.id%RES_COLORS.length],hat,vest;
   const jt=n.job&&n.job.type;
   if(jt==='police'){body='#2e3e5e';hat='#22305a'}
-  else if(jt==='hosp'){body='#c9ced4'}
+  else if(jt==='hosp'||jt==='medic'){body='#c9ced4'}
   else if(jt==='fire'){body='#8a3030'}
   else if(jt==='factory'){body='#5a5a48'}
+  else if(jt==='media'){body='#3f6f8a'}
+  else if(jt==='janitor'){body='#c9772b'}
+  else if(jt==='courier'){body='#c9a92b'}
+  else if(jt==='taxi'){body='#a98a2b'}
+  else if(jt==='bus'){body='#3e6a8a'}
+  else if(jt==='cafe'){body='#7a5a3a'}
   if(n.kind==='mil'||n.kind==='milinf'){body=n.kind==='milinf'?'#42502e':(n.police?'#2e3e5e':'#4a5540');
     hat=n.police?'#22305a':'#39422f';if(n.kind==='mil')vest='#3a4232'}
   return {body,hat,vest};
@@ -3011,9 +3262,12 @@ function render(){
     }});
   }
   for(const npc of npcs){
+    if(npc.inCar)continue;
     if(npc.x<bx||npc.x>bx+bw||npc.y<by||npc.y>by+bh2)continue;
     list.push({d:npc.x+npc.y,f:()=>drawFigureIso(npc)});
   }
+  if(bridge&&bridge.signX>bx&&bridge.signX<bx+bw&&bridge.signY>by&&bridge.signY<by+bh2)
+    list.push({d:bridge.signX+bridge.signY,f:drawBridgeSign});
   list.push({d:pDepth,f:drawPlayerIso});
   list.sort((a,b)=>a.d-b.d);
   for(const it of list)it.f();
@@ -3115,7 +3369,7 @@ function renderLight(n){
       const w=b.windows[i];cut(w.tx*TILE+16,w.ty*TILE+16,55,.5);
     }
   }
-  if(quarantined)for(const t of towers)cone(t.x,t.y,t.ang,330,.22,.9);
+  if(quarantined&&bridge)cut(bridge.cx,bridge.barY+70,220,.85); // прожектора моста
   for(const v of vehicles){
     if(v.parked)continue;
     cone(v.x,v.y,v.ang,140,.3,.8);cut(v.x,v.y,50,.6);
@@ -3147,7 +3401,7 @@ function renderLight(n){
       const w=b.windows[i];halo(w.tx*TILE+16,w.ty*TILE+16,36,255,168,80,.16*n);
     }
   }
-  if(quarantined)for(const t of towers)halo(t.x,t.y,60,190,215,255,.12*n);
+  if(quarantined&&bridge)halo(bridge.cx,bridge.barY+70,120,190,215,255,.14*n);
   for(const v of vehicles){
     if(v.parked)continue;
     halo(v.x+Math.cos(v.ang)*60,v.y+Math.sin(v.ang)*60,70,255,235,180,.12*n);
@@ -3210,6 +3464,7 @@ function updateHUD(){
   const wl=[];
   if(weather==='rain')wl.push('🌧 дождь');if(weather==='blackout')wl.push('🌑 нет света');
   if(day>=89)wl.push('❄ зима близко');if(airzone)wl.push('🚨 АВИАУДАР: '+Math.ceil(airzone.timer)+'с');
+  if(P.dirty)wl.push('🩸 вы в крови');
   if(P.wanted)wl.push('⭐ В РОЗЫСКЕ');
   $('clock').querySelector('.w').textContent=wl.join(' · ');
   $('lowhp').style.opacity=P.hp<P.maxhp*.3?(.4+Math.sin(performance.now()/200)*.25):0;
@@ -3267,7 +3522,7 @@ function update(dt){
   if(hasDead)npcs=npcs.filter(n=>!n.dead);
   for(let i=corpses.length-1;i>=0;i--){const c=corpses[i];
     if(c.rise>0){c.rise-=dt;
-      if(c.rise<=0){const z=spawnNPC('inf',c.x,c.y);z.stun=1;spray(c.x,c.y,'#5a7a3a',10);
+      if(c.rise<=0){const z=spawnNPC(c.kind==='mil'?'milinf':'inf',c.x,c.y);z.stun=1;spray(c.x,c.y,'#5a7a3a',10);
         if(dist(c.x,c.y,P.x,P.y)<500)sfx.groan();corpses.splice(i,1)}}
   }
   for(let i=noises.length-1;i>=0;i--){noises[i].t-=dt;if(noises[i].t<=0)noises.splice(i,1)}
@@ -3298,8 +3553,9 @@ function stopLoop(){running=false;cancelAnimationFrame(raf)}
    ПОТОК ИГРЫ
    ============================================================ */
 function newRun(hc,build){
-  hardcore=hc;seed=(Date.now()%1e9)|0; // каждая новая игра — новая карта
+  hardcore=hc;seed=(Date.now()%1e9)|0; // каждая новая игра — полностью новая карта
   rngS=mulberry32(seed^0x9e3779);
+  nightSurgeFrac=.2+R()*.3; // сколько города обратится в первую ночь (20–50%)
   day=1;tod=0;worldT=0;deathsRun=0;checkpoints={};weather='';NODES=null;
   genWorld();spawnPopulation();
   const home=buildings.find(b=>b.type==='home');
@@ -3327,7 +3583,7 @@ function restoreFromDay(d){
     const home=buildings.find(b=>b.type==='home');
     const hs=home.homeSpots[0];P.x=hs.x;P.y=hs.y;
   }
-  if(day>=2)applyQuarantine(true);
+  if(day>=3)applyQuarantine(true);
   scheduleDay();
   $('dead').classList.add('hidden');$('hud').classList.add('on');
   state='play';showDaycard();startLoop();
@@ -3337,8 +3593,8 @@ const DEATH_QUOTES=[
   'Совет: радио предупреждает об авиаударах. Купите его в хозтоварах в первый день.',
   'Совет: выстрелы слышно за полгорода. Бита тише.',
   'Совет: не пейте вскрытую воду — вирус передаётся со слюной.',
-  'Совет: военные стреляют на поражение у периметра. Держитесь дальше от проволоки.',
-  'Совет: кусачки продаются в хозтоварах. В первый день — за деньги, потом — как повезёт.',
+  'Совет: не подходите к мосту — военные никого не выпускают из города.',
+  'Совет: если вы в крови, военные могут принять вас за заражённого. Особенно ночью. Переоденьтесь во сне.',
   'Совет: ночью зомби видят хуже, но слышат лучше. И вы ничего не видите без фонаря.',
   'Совет: сломанная дверь не запирается. Забаррикадируйте её досками или задвиньте шкафом (G).',
   'Совет: выжившие в домах меняют вещи на еду. Не стреляйте в них.',
@@ -3370,8 +3626,10 @@ function winGame(kind){
     $('wintitle').textContent='ВЫ ВЫБРАЛИСЬ';
     $('wintext').textContent='Проволока перерезана. Позади — город, который уже не спасти. Впереди — неизвестность. Но вы живы. Пока что.';
   }else{
-    $('wintitle').textContent='100 ДНЕЙ. ЗИМА.';
-    $('wintext').textContent='Мороз сковал город. Заражённые замерли, как статуи. Вы пережили то, что пережить нельзя. '+
+    $('wintitle').textContent='ДЕНЬ 100. АРМИЯ.';
+    $('wintext').textContent='На рассвете сотого дня с той стороны реки загудела колонна. Армия вошла в город большим отрядом: '+
+      'методично, квартал за кварталом, они зачистили улицы от замёрзших на морозе заражённых и собрали выживших у моста. '+
+      'Вывеску со словом «NEVER» сорвали первой. Сто дней. Вы дожили. '+
       (hardcore&&deathsRun===0?'БЕЗ ЕДИНОЙ СМЕРТИ НА ХАРДКОРЕ. Свяжитесь с разработчиками: приз $100 000 ваш.':'');
   }
   $('winstats').innerHTML=`выжито дней: <b>${day}</b> · смертей за забег: <b>${deathsRun}</b> · убито: <b>${P.kills}</b>`;
