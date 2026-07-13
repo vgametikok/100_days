@@ -180,6 +180,7 @@ button.pri:hover{background:var(--red2)}
     <button id="btnHard">☠ Хардкор</button>
     <button id="btnHelp">Как играть</button>
   </div>
+  <div id="saveHint" class="hidden" style="margin-top:14px;font-size:13px;color:var(--amber);letter-spacing:.5px">🔒 Войдите в Sharky, чтобы сохранять прогресс и продолжать игру между сессиями.</div>
   <div id="help" class="hidden">
     <div><b>WASD</b> движение</div>
     <div><b>Shift</b> бег (тратит силы)</div>
@@ -322,7 +323,10 @@ function applyLoadedProgress(blob){
 if(embedded){
   addEventListener('message',e=>{
     const d=e.data||{};
-    if(d.type==='sharky-progress'&&d.data&&typeof d.data==='object')applyLoadedProgress(d.data);
+    if(d.type==='sharky-progress'){
+      if(d.data&&typeof d.data==='object')applyLoadedProgress(d.data);
+      if(d.guest&&typeof showSaveHint==='function')showSaveHint(); // гость: сохранять некуда
+    }
   });
   try{window.parent.postMessage({type:'sharky-progress-load'},'*')}catch(e){}
 }
@@ -4183,6 +4187,7 @@ function toMenu(){
 function updateMenuStats(){
   $('menustats').innerHTML=`всего смертей: <b>${meta.deaths}</b> · рекорд: день <b>${meta.best}</b> · побед: <b>${meta.wins}</b>`;
 }
+function showSaveHint(){const e=$('saveHint');if(e)e.classList.remove('hidden');}
 function updateContinueBtn(){
   const b=$('btnContinue');if(!b)return;
   if(savedRun&&savedRun.snap){
