@@ -284,7 +284,32 @@ let checkpoints={};
 let P=null;
 let meta={deaths:0,best:1,wins:0};
 try{const m=localStorage.getItem('hds100');if(m)meta=JSON.parse(m)}catch(e){}
-const saveMeta=()=>{try{localStorage.setItem('hds100',JSON.stringify(meta))}catch(e){}};
+/* ---------- ОБЛАЧНЫЙ ПРОГРЕСС (Sharky) ----------
+   В песочнице сайта localStorage недоступен: прогресс (счётчик смертей,
+   рекорд, победы) синхронизируется через родительский плеер по postMessage,
+   а тот пишет его в отдельный Supabase-проект сейвов. Standalone-запуск
+   (открыть файл напрямую) продолжает работать на localStorage. */
+const embedded=(()=>{try{return !!window.parent&&window.parent!==window}catch(e){return true}})();
+function cloudSave(){
+  if(!embedded)return;
+  try{window.parent.postMessage({type:'sharky-progress-save',
+    data:{deaths:meta.deaths|0,best:meta.best|0,wins:meta.wins|0}},'*')}catch(e){}
+}
+const saveMeta=()=>{try{localStorage.setItem('hds100',JSON.stringify(meta))}catch(e){}cloudSave()};
+if(embedded){
+  addEventListener('message',e=>{
+    const d=e.data||{};
+    if(d.type==='sharky-progress'&&d.data&&typeof d.data==='object'){
+      // счётчики только растут — берём максимум локального и облачного
+      meta.deaths=Math.max(meta.deaths|0,d.data.deaths|0);
+      meta.best=Math.max(meta.best|0,d.data.best|0);
+      meta.wins=Math.max(meta.wins|0,d.data.wins|0);
+      try{localStorage.setItem('hds100',JSON.stringify(meta))}catch(_){}
+      if(typeof updateMenuStats==='function')updateMenuStats();
+    }
+  });
+  try{window.parent.postMessage({type:'sharky-progress-load'},'*')}catch(e){}
+}
 
 /* ---------- TIME ---------- */
 const hour=()=> (6+tod*24)%24;
