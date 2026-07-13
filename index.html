@@ -175,6 +175,7 @@ button.pri:hover{background:var(--red2)}
   Первый, кто пройдёт игру на <b>хардкоре</b> без читов и без единой смерти, получит <b>$100 000</b>.</div>
   <div class="stats" id="menustats"></div>
   <div class="btns">
+    <button class="pri hidden" id="btnContinue">▶ Продолжить</button>
     <button class="pri" id="btnPlay">Новая игра</button>
     <button id="btnHard">☠ Хардкор</button>
     <button id="btnHelp">Как играть</button>
@@ -283,30 +284,45 @@ let events=[],airzone=null,pzDone=false;
 let checkpoints={};
 let P=null;
 let meta={deaths:0,best:1,wins:0};
+let savedRun=null; // сейв текущего забега для кнопки «Продолжить»
 try{const m=localStorage.getItem('hds100');if(m)meta=JSON.parse(m)}catch(e){}
-/* ---------- ОБЛАЧНЫЙ ПРОГРЕСС (Sharky) ----------
-   В песочнице сайта localStorage недоступен: прогресс (счётчик смертей,
-   рекорд, победы) синхронизируется через родительский плеер по postMessage,
-   а тот пишет его в отдельный Supabase-проект сейвов. Standalone-запуск
-   (открыть файл напрямую) продолжает работать на localStorage. */
+try{const r=localStorage.getItem('hds100run');if(r)savedRun=JSON.parse(r)}catch(e){}
+/* ---------- ПРОГРЕСС: профиль + сейв забега (Sharky) ----------
+   Накопительный профиль (смерти/рекорд/победы) И сейв текущего забега для
+   «Продолжить». В песочнице сайта localStorage недоступен — всё уходит через
+   родительский плеер по postMessage в отдельный Supabase-проект сейвов.
+   Standalone-запуск (открыть файл напрямую) работает на localStorage. */
 const embedded=(()=>{try{return !!window.parent&&window.parent!==window}catch(e){return true}})();
-function cloudSave(){
-  if(!embedded)return;
-  try{window.parent.postMessage({type:'sharky-progress-save',
-    data:{deaths:meta.deaths|0,best:meta.best|0,wins:meta.wins|0}},'*')}catch(e){}
+function progressBlob(){return {meta:{deaths:meta.deaths|0,best:meta.best|0,wins:meta.wins|0},run:savedRun};}
+function persistProgress(){
+  try{localStorage.setItem('hds100',JSON.stringify(meta))}catch(e){}
+  try{if(savedRun)localStorage.setItem('hds100run',JSON.stringify(savedRun));else localStorage.removeItem('hds100run')}catch(e){}
+  if(embedded){try{window.parent.postMessage({type:'sharky-progress-save',data:progressBlob()},'*')}catch(e){}}
 }
-const saveMeta=()=>{try{localStorage.setItem('hds100',JSON.stringify(meta))}catch(e){}cloudSave()};
+const saveMeta=persistProgress; // прежние вызовы saveMeta() теперь пишут весь прогресс
+function captureRun(){ // снимок забега (по началу текущего дня — как чекпоинты игры)
+  if(state!=='play'&&state!=='pause')return;
+  savedRun={seed,day,deathsRun:deathsRun|0,hardcore:!!hardcore,
+    nightSurgeFrac,snap:checkpoints[day]||snapshotPlayer()};
+}
+function clearRun(){savedRun=null;}
+function applyLoadedProgress(blob){
+  // новая форма {meta,run}; старая (совместимость) — просто {deaths,best,wins}
+  const m=blob&&blob.meta?blob.meta:blob;
+  if(m&&typeof m==='object'){ // счётчики монотонны — берём максимум локального и облачного
+    meta.deaths=Math.max(meta.deaths|0,m.deaths|0);
+    meta.best=Math.max(meta.best|0,m.best|0);
+    meta.wins=Math.max(meta.wins|0,m.wins|0);
+  }
+  if(blob&&blob.run&&typeof blob.run==='object'&&blob.run.snap)savedRun=blob.run;
+  try{localStorage.setItem('hds100',JSON.stringify(meta))}catch(_){}
+  if(typeof updateMenuStats==='function')updateMenuStats();
+  if(typeof updateContinueBtn==='function')updateContinueBtn();
+}
 if(embedded){
   addEventListener('message',e=>{
     const d=e.data||{};
-    if(d.type==='sharky-progress'&&d.data&&typeof d.data==='object'){
-      // счётчики только растут — берём максимум локального и облачного
-      meta.deaths=Math.max(meta.deaths|0,d.data.deaths|0);
-      meta.best=Math.max(meta.best|0,d.data.best|0);
-      meta.wins=Math.max(meta.wins|0,d.data.wins|0);
-      try{localStorage.setItem('hds100',JSON.stringify(meta))}catch(_){}
-      if(typeof updateMenuStats==='function')updateMenuStats();
-    }
+    if(d.type==='sharky-progress'&&d.data&&typeof d.data==='object')applyLoadedProgress(d.data);
   });
   try{window.parent.postMessage({type:'sharky-progress-load'},'*')}catch(e){}
 }
@@ -2660,6 +2676,7 @@ function nextDay(){
   if(day>=5&&R()<.5){const b=pick(buildings);spawnNPC('milinf',(b.tx-1)*TILE,(b.ty+2)*TILE)}
   scheduleDay();
   checkpoints[day]=snapshotPlayer();
+  captureRun();persistProgress(); // сейв забега на новый день
   showDaycard();
 }
 const DAYFLAVOR=['Обычный понедельник','Что-то не так','Город умирает','Они повсюду','Надежды всё меньше',
@@ -4059,7 +4076,9 @@ function newRun(hc,build){
   $('win').classList.add('hidden');$('pausemenu').classList.add('hidden');
   $('charsel').classList.add('hidden');
   $('hud').classList.add('on');
-  state='play';resize();showDaycard();startLoop();
+  state='play';resize();
+  captureRun();persistProgress(); // забег сохранён с первого дня
+  showDaycard();startLoop();
 }
 function restoreFromDay(d){
   const snap=checkpoints[d]||checkpoints[1];
@@ -4076,7 +4095,21 @@ function restoreFromDay(d){
   if(day>=3)applyQuarantine(true);
   scheduleDay();
   $('dead').classList.add('hidden');$('hud').classList.add('on');
-  state='play';showDaycard();startLoop();
+  state='play';captureRun();persistProgress();showDaycard();startLoop();
+}
+function continueRun(){
+  // возобновить сохранённый забег в свежей сессии (карта регенерится из сида)
+  const r=savedRun;if(!r||!r.snap)return;
+  ensureAudio();
+  seed=r.seed;hardcore=!!r.hardcore;deathsRun=r.deathsRun|0;
+  if(typeof r.nightSurgeFrac==='number')nightSurgeFrac=r.nightSurgeFrac;
+  checkpoints={};checkpoints[r.day]=r.snap;
+  lastBuild={stats:{...r.snap.stats},perk:r.snap.perk,charKey:r.snap.charKey,work:r.snap.workType};
+  $('menu').classList.add('hidden');$('dead').classList.add('hidden');
+  $('win').classList.add('hidden');$('pausemenu').classList.add('hidden');
+  $('charsel').classList.add('hidden');$('help').classList.add('hidden');
+  $('hud').classList.add('on');
+  resize();restoreFromDay(r.day);
 }
 const DEATH_QUOTES=[
   'Совет: заражённые не охотятся на укушенных. Иногда укус — это маскировка.',
@@ -4093,7 +4126,9 @@ const DEATH_QUOTES=[
 function die(cause){
   if(P.dead)return;
   P.dead=true;meta.deaths++;deathsRun++;
-  meta.best=Math.max(meta.best,day);saveMeta();
+  meta.best=Math.max(meta.best,day);
+  if(hardcore)clearRun(); // хардкорный забег окончен — «Продолжить» не предлагаем
+  saveMeta();
   sfx.beat();flashDmg(1);
   setTimeout(()=>{
     state='dead';
@@ -4110,7 +4145,7 @@ function die(cause){
   },900);
 }
 function winGame(kind){
-  state='win';meta.wins++;meta.best=Math.max(meta.best,day);saveMeta();
+  state='win';meta.wins++;meta.best=Math.max(meta.best,day);clearRun();saveMeta();
   $('hud').classList.remove('on');
   if(kind==='escape'){
     $('wintitle').textContent='ВЫ ВЫБРАЛИСЬ';
@@ -4143,10 +4178,21 @@ function toMenu(){
   $('pausemenu').classList.add('hidden');$('dead').classList.add('hidden');
   $('win').classList.add('hidden');$('charsel').classList.add('hidden');
   $('hud').classList.remove('on');
-  $('menu').classList.remove('hidden');updateMenuStats();
+  $('menu').classList.remove('hidden');updateMenuStats();updateContinueBtn();
 }
 function updateMenuStats(){
   $('menustats').innerHTML=`всего смертей: <b>${meta.deaths}</b> · рекорд: день <b>${meta.best}</b> · побед: <b>${meta.wins}</b>`;
+}
+function updateContinueBtn(){
+  const b=$('btnContinue');if(!b)return;
+  if(savedRun&&savedRun.snap){
+    b.classList.remove('hidden');
+    b.textContent=`▶ Продолжить · день ${savedRun.day}`+(savedRun.hardcore?' ☠':'');
+    $('btnPlay').classList.remove('pri'); // основной CTA — «Продолжить»
+  }else{
+    b.classList.add('hidden');
+    $('btnPlay').classList.add('pri');
+  }
 }
 
 /* ============================================================
@@ -4207,6 +4253,7 @@ function buildCharsel(){
 }
 
 /* ---------- КНОПКИ ---------- */
+$('btnContinue').onclick=()=>continueRun();
 $('btnPlay').onclick=()=>{ensureAudio();openCharsel(false)};
 $('btnHard').onclick=()=>{ensureAudio();openCharsel(true)};
 $('btnHelp').onclick=()=>$('help').classList.toggle('hidden');
@@ -4221,7 +4268,7 @@ $('btnResume').onclick=()=>setPause(false);
 $('btnQuit').onclick=toMenu;
 
 /* ---------- СТАРТ ---------- */
-resize();makeGrain();updateMenuStats();loadChars();
+resize();makeGrain();updateMenuStats();updateContinueBtn();loadChars();
 </script>
 </body>
 </html>
