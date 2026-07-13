@@ -108,15 +108,16 @@ button.pri:hover{background:var(--red2)}
 .hint b{color:#9aa0a8}
 
 /* ---------- ВЫБОР ПЕРСОНАЖА ---------- */
-#charsel .chars{display:flex;gap:12px;margin-top:22px;flex-wrap:wrap;justify-content:center}
-.ccard{width:158px;padding:14px 10px;background:rgba(255,255,255,.03);border:1px solid var(--line);
+#charsel .chars{display:flex;gap:18px;margin-top:22px;flex-wrap:wrap;justify-content:center}
+.ccard{width:236px;padding:16px 12px;background:rgba(255,255,255,.03);border:1px solid var(--line);
   border-radius:12px;cursor:pointer;transition:all .15s}
 .ccard:hover{background:rgba(255,255,255,.08);transform:translateY(-3px)}
 .ccard.sel{border-color:var(--amber);box-shadow:0 0 18px rgba(232,163,61,.35);background:rgba(232,163,61,.07)}
 .ccard .ic{font-size:38px}
-.ccard .nm{margin-top:6px;font-size:14px;font-weight:700;color:#e9e4da}
-.ccard .pk{margin-top:6px;font-size:11px;color:var(--amber);letter-spacing:.5px}
-.ccard .pd{margin-top:4px;font-size:10.5px;color:#8b919a;line-height:1.45}
+.ccard img{height:190px;image-rendering:pixelated;filter:drop-shadow(0 6px 8px rgba(0,0,0,.5))}
+.ccard .nm{margin-top:8px;font-size:15px;font-weight:700;color:#e9e4da}
+.ccard .pk{margin-top:6px;font-size:11.5px;color:var(--amber);letter-spacing:.5px}
+.ccard .pd{margin-top:4px;font-size:11px;color:#8b919a;line-height:1.45}
 .statbox{margin-top:18px;background:rgba(255,255,255,.02);border:1px solid var(--line);
   border-radius:12px;padding:12px 22px;min-width:340px}
 .strow{display:flex;align-items:center;gap:10px;margin:7px 0}
@@ -239,7 +240,7 @@ button.pri:hover{background:var(--red2)}
 <script>
 'use strict';
 /* ============================================================
-   100 DAYS SURVIVE v0.3 — «Живой город»
+   100 DAYS SURVIVE v0.7 — «Мир Project Zomboid»: стены на рёбрах, PZ-пайплайн генерации
    Один самодостаточный файл. Canvas 2D, WebAudio-синтез.
    ============================================================ */
 const $=id=>document.getElementById(id);
@@ -261,7 +262,7 @@ const pickW=arr=>arr[Math.floor(RW()*arr.length)];
 const TILE=32, MW=140, MH=96, W=MW*TILE, H=MH*TILE;
 const DAY_SEC=420;               // 1 игровой день = 7 минут
 const ZOOM=1.3;
-const G_GRASS=0,G_ROAD=1,G_SIDE=2,G_PARK=3,G_PLAZA=4,G_FLOOR=5,G_YARD=6,G_WALL=7,G_SAND=8,G_WATER=9,G_BRIDGE=10,G_ROCK=11;
+const G_GRASS=0,G_ROAD=1,G_SIDE=2,G_PARK=3,G_PLAZA=4,G_FLOOR=5,G_YARD=6,G_WALL=7,G_SAND=8,G_WATER=9,G_BRIDGE=10,G_ROCK=11,G_DIRT=12,G_GRAVEL=13;
 
 /* ---------- STATE ---------- */
 let state='menu';
@@ -271,7 +272,8 @@ let seed=1, hardcore=false;
 let deathsRun=0, weather='';
 let quarantined=false;
 let cam={x:0,y:0,shake:0};
-let ground,solid,bmap;
+let ground,solid,bmap,edgeW,edgeN;
+let roadSegs=[],roadNodesL=[],BX=0,BY=0,cityRect=null;
 let buildings=[],trees=[],cars=[],lamps=[],towers=[],gates=[],props=[],busStops=[];
 let bridge=null; // единственный выход из города — мост (в ремонте)
 let vehicles=[];
@@ -348,7 +350,7 @@ const keys={}; let mouse={x:0,y:0,l:false,r:false};
 addEventListener('keydown',e=>{
   if(e.repeat)return; keys[e.code]=true;
   if(state==='play'){
-    if(e.code.startsWith('Digit')){const n=+e.code.slice(5);if(n>=1&&n<=8)P.sel=n-1;sfx.click();}
+    if(e.code.startsWith('Digit')){const n=+e.code.slice(5),m=n===0?10:n;if(P&&m>=1&&m<=P.inv.length)P.sel=m-1;sfx.click();}
     if(e.code==='KeyQ')dropSelected();
     if(e.code==='KeyF')toggleFlash();
     if(e.code==='KeyG')tryPush();
@@ -366,15 +368,82 @@ addEventListener('blur',()=>{if(state==='play')setPause(true)});
 const idx=(tx,ty)=>ty*MW+tx;
 const inMap=(tx,ty)=>tx>=0&&ty>=0&&tx<MW&&ty<MH;
 const isSolid=(tx,ty)=>!inMap(tx,ty)||solid[idx(tx,ty)]===1;
-function los(x0,y0,x1,y1){
-  const dx=x1-x0,dy=y1-y0,d=Math.hypot(dx,dy);
-  const steps=Math.ceil(d/14);
-  for(let i=1;i<steps;i++){
-    const x=x0+dx*i/steps,y=y0+dy*i/steps;
-    if(isSolid((x/TILE)|0,(y/TILE)|0))return false;
-  }return true;}
+/* ---------- РЁБРА (модель Project Zomboid) ----------
+   Стена живёт не в тайле, а на его ЗАПАДНОЙ или СЕВЕРНОЙ грани.
+   Южная/восточная стены — это W/N-рёбра соседних тайлов.
+   E_WIN: непроходимо, но прозрачно для взгляда и пуль. */
+const E_NONE=0,E_WALL=1,E_WIN=2,E_DOOR=3;
+const ekey=(tx,ty,side)=>(ty*MW+tx)*2+(side==='N'?1:0);
+const edgeAt=(tx,ty,side)=>!inMap(tx,ty)?E_NONE:(side==='N'?edgeN:edgeW)[idx(tx,ty)];
+function setEdge(tx,ty,side,v){if(inMap(tx,ty))(side==='N'?edgeN:edgeW)[idx(tx,ty)]=v}
+const doorCx=d=>d.side==='W'?d.tx*TILE:(d.tx+.5)*TILE;
+const doorCy=d=>d.side==='W'?(d.ty+.5)*TILE:d.ty*TILE;
+function edgeBlocked(tx,ty,side,vision){
+  if(!inMap(tx,ty))return true;
+  const e=edgeAt(tx,ty,side);
+  if(e===E_NONE)return false;
+  if(e===E_WALL)return true;
+  if(e===E_WIN)return !vision;
+  const d=doorsMap.get(ekey(tx,ty,side));
+  return !(d&&d.state===1);
+}
+function canCross(ax,ay,bx,by,vision){ // между СОСЕДНИМИ тайлами
+  if(bx>ax)return !edgeBlocked(bx,by,'W',vision);
+  if(bx<ax)return !edgeBlocked(ax,ay,'W',vision);
+  if(by>ay)return !edgeBlocked(bx,by,'N',vision);
+  if(by<ay)return !edgeBlocked(ax,ay,'N',vision);
+  return true;
+}
+function doorBetween(ax,ay,bx,by){
+  if(bx>ax)return doorsMap.get(ekey(bx,by,'W'));
+  if(bx<ax)return doorsMap.get(ekey(ax,ay,'W'));
+  if(by>ay)return doorsMap.get(ekey(bx,by,'N'));
+  if(by<ay)return doorsMap.get(ekey(ax,ay,'N'));
+  return null;
+}
+/* DDA-обход сетки: виден ли путь (vision: окна прозрачны) */
+function gridRay(x0,y0,x1,y1,vision){
+  let tx=Math.floor(x0/TILE),ty=Math.floor(y0/TILE);
+  const txE=Math.floor(x1/TILE),tyE=Math.floor(y1/TILE);
+  const dx=x1-x0,dy=y1-y0;
+  const stepX=dx>0?1:-1,stepY=dy>0?1:-1;
+  const tDX=dx!==0?Math.abs(TILE/dx):1e9,tDY=dy!==0?Math.abs(TILE/dy):1e9;
+  let tMX=dx!==0?((stepX>0?(tx+1)*TILE-x0:x0-tx*TILE)/Math.abs(dx)):1e9;
+  let tMY=dy!==0?((stepY>0?(ty+1)*TILE-y0:y0-ty*TILE)/Math.abs(dy)):1e9;
+  let guard=0;
+  while((tx!==txE||ty!==tyE)&&guard++<260){
+    let nx=tx,ny=ty;
+    if(tMX<tMY){nx=tx+stepX;tMX+=tDX}else{ny=ty+stepY;tMY+=tDY}
+    if(!inMap(nx,ny))return false;
+    if(!canCross(tx,ty,nx,ny,vision))return false;
+    if(solid[idx(nx,ny)]&&!(nx===txE&&ny===tyE))return false;
+    tx=nx;ty=ny;
+  }
+  return true;
+}
+function los(x0,y0,x1,y1){return gridRay(x0,y0,x1,y1,true)}
+/* луч до первой преграды (стены-рёбра, закрытые двери, solid-тайлы); окна простреливаются */
+function castRay(x0,y0,ang,maxD){
+  const dx=Math.cos(ang),dy=Math.sin(ang);
+  let tx=Math.floor(x0/TILE),ty=Math.floor(y0/TILE);
+  const stepX=dx>0?1:-1,stepY=dy>0?1:-1;
+  const tDX=dx!==0?Math.abs(TILE/dx):1e9,tDY=dy!==0?Math.abs(TILE/dy):1e9;
+  let tMX=dx!==0?((stepX>0?(tx+1)*TILE-x0:x0-tx*TILE)/Math.abs(dx)):1e9;
+  let tMY=dy!==0?((stepY>0?(ty+1)*TILE-y0:y0-ty*TILE)/Math.abs(dy)):1e9;
+  let guard=0;
+  while(guard++<260){
+    let nx=tx,ny=ty,nt;
+    if(tMX<tMY){nt=tMX;nx=tx+stepX;tMX+=tDX}else{nt=tMY;ny=ty+stepY;tMY+=tDY}
+    if(nt>=maxD)break;
+    if(!inMap(nx,ny)||!canCross(tx,ty,nx,ny,true)||solid[idx(nx,ny)])
+      return {x:x0+dx*nt,y:y0+dy*nt,d:nt};
+    tx=nx;ty=ny;
+  }
+  return {x:x0+dx*maxD,y:y0+dy*maxD,d:maxD};
+}
 function collide(e){
   const r=e.r;
+  // solid-тайлы: мебель, деревья, машины, скалы, вода
   const tx0=((e.x-r)/TILE)|0,ty0=((e.y-r)/TILE)|0,tx1=((e.x+r)/TILE)|0,ty1=((e.y+r)/TILE)|0;
   for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
     if(!isSolid(tx,ty))continue;
@@ -384,14 +453,38 @@ function collide(e){
       const d=Math.sqrt(d2),push=r-d;
       e.x+=dx/d*push;e.y+=dy/d*push;}
   }
+  // рёберные стены: вертикальные линии x=gx·TILE (W) и горизонтальные y=gy·TILE (N)
+  for(let gx=Math.ceil((e.x-r)/TILE);gx<=Math.floor((e.x+r)/TILE);gx++){
+    const lx=gx*TILE;
+    for(let ty=((e.y-r)/TILE)|0;ty<=((e.y+r)/TILE)|0;ty++){
+      if(!edgeBlocked(gx,ty,'W',false))continue;
+      const cy=clamp(e.y,ty*TILE,(ty+1)*TILE);
+      const dx2=e.x-lx,dy2=e.y-cy,d2=dx2*dx2+dy2*dy2;
+      if(d2<r*r){
+        if(Math.abs(dy2)<.5)e.x=lx+(dx2>=0?r:-r);
+        else{const d=Math.sqrt(d2)||.001,push=r-d;e.x+=dx2/d*push;e.y+=dy2/d*push}
+      }
+    }
+  }
+  for(let gy=Math.ceil((e.y-r)/TILE);gy<=Math.floor((e.y+r)/TILE);gy++){
+    const ly=gy*TILE;
+    for(let tx=((e.x-r)/TILE)|0;tx<=((e.x+r)/TILE)|0;tx++){
+      if(!edgeBlocked(tx,gy,'N',false))continue;
+      const cx=clamp(e.x,tx*TILE,(tx+1)*TILE);
+      const dx2=e.x-cx,dy2=e.y-ly,d2=dx2*dx2+dy2*dy2;
+      if(d2<r*r){
+        if(Math.abs(dx2)<.5)e.y=ly+(dy2>=0?r:-r);
+        else{const d=Math.sqrt(d2)||.001,push=r-d;e.x+=dx2/d*push;e.y+=dy2/d*push}
+      }
+    }
+  }
   e.x=clamp(e.x,TILE,W-TILE);e.y=clamp(e.y,TILE,H-TILE);
 }
 function addNoise(x,y,radius){noises.push({x,y,r:radius,t:1.2})}
 
 /* ============================================================
-   ГЕНЕРАЦИЯ ГОРОДА v2 — «живой город»
+   ГЕНЕРАЦИЯ МИРА v3 — «живой город» по пайплайну Project Zomboid
    ============================================================ */
-const ROADV=[20,44,68,92,116], ROADH=[20,44,68];
 const BTYPES={
   house:  {name:'ЖИЛОЙ ДОМ', roof:'#4a3f38'},
   flat:   {name:'МНОГОКВАРТИРНЫЙ ДОМ',roof:'#3d4048'},
@@ -405,133 +498,297 @@ const BTYPES={
   police: {name:'ПОЛИЦИЯ',   roof:'#3a3f4f'},
   fire:   {name:'ПОЖАРНАЯ Ч.',roof:'#4f3a3a'},
   office: {name:'ОФИС',      roof:'#40454e'},
+  bank:   {name:'БАНК',      roof:'#3c4252'},
+  autoshop:{name:'АВТОСЕРВИС',roof:'#4a443c'},
   factory:{name:'ФАБРИКА',   roof:'#45403c'},
   home:   {name:'ВАШ ДОМ',   roof:'#523f33'},
+  cabin:  {name:'ОХОТНИЧИЙ ДОМИК',roof:'#3e3a30'},
 };
+let nOx=0,nOy=0,riverTop=null,riverBot=null,blocksG=[],cabinRect=null;
+/* билинейный value-noise поверх hash2 — «кисть» terrain/vegetation карт */
+function vnoise(x,y,s){
+  const gx=Math.floor(x/s),gy=Math.floor(y/s),fx=x/s-gx,fy=y/s-gy;
+  const a=hash2(gx+nOx,gy+nOy),b=hash2(gx+1+nOx,gy+nOy),
+        c=hash2(gx+nOx,gy+1+nOy),d=hash2(gx+1+nOx,gy+1+nOy);
+  const u=fx*fx*(3-2*fx),v=fy*fy*(3-2*fy);
+  return a+(b-a)*u+(c-a)*v+(a-b-c+d)*u*v;
+}
 function genWorld(){
   rngW=mulberry32(seed);
   ground=new Uint8Array(MW*MH); solid=new Uint8Array(MW*MH); bmap=new Int16Array(MW*MH).fill(-1);
+  edgeW=new Uint8Array(MW*MH); edgeN=new Uint8Array(MW*MH);
   buildings=[];trees=[];cars=[];lamps=[];towers=[];gates=[];props=[];busStops=[];vehicles=[];
+  roadSegs=[];roadNodesL=[];blocksG=[];cabinRect=null;
   doorsMap.clear();
   npcs=[];bullets=[];parts=[];groundItems=[];corpses=[];noises=[];airzone=null;
   quarantined=false;pzDone=false;
-  // дороги — до самого края (выезды из города)
-  for(const v of ROADV)for(let y=0;y<MH;y++){for(let x=v;x<v+4;x++)ground[idx(x,y)]=G_ROAD;
-    ground[idx(v-1,y)]=G_SIDE;ground[idx(v+4,y)]=G_SIDE;}
-  for(const h of ROADH)for(let x=0;x<MW;x++){for(let y=h;y<h+4;y++)ground[idx(x,y)]=G_ROAD;
-    if(ground[idx(x,h-1)]===G_GRASS)ground[idx(x,h-1)]=G_SIDE;
-    if(ground[idx(x,h+4)]===G_GRASS)ground[idx(x,h+4)]=G_SIDE;}
-  // кварталы
-  const xs=[5];for(const v of ROADV){xs.push(v-2);xs.push(v+6)}xs.push(MW-6);
-  const ys=[5];for(const h of ROADH){ys.push(h-2);ys.push(h+6)}ys.push(MH-6);
-  const blocks=[];
-  for(let i=0;i<xs.length;i+=2)for(let j=0;j<ys.length;j+=2){
-    const bx=xs[i],by=ys[j],bw=xs[i+1]-xs[i]+1,bh=ys[j+1]-ys[j]+1;
-    if(bw>=10&&bh>=10)blocks.push({bx,by,bw,bh,area:bw*bh});}
-  // план города: обязательные здания
-  const plans=['factory','hospital','flat','flat','flat','office','office','market',
-    'shopsA','shopsB','police','fire','park','park','plaza','beach','home'];
-  const shuffled=blocks.slice();
-  for(let i=shuffled.length-1;i>0;i--){const j=Math.floor(RW()*(i+1));[shuffled[i],shuffled[j]]=[shuffled[j],shuffled[i]]}
-  // большие планы — в большие кварталы
-  shuffled.sort((a,b)=>b.area-a.area);
-  const bigPlans=['factory','hospital','flat','flat','flat'];
-  const blockPlan=new Map();
-  let bi=0;
-  for(const p of bigPlans)blockPlan.set(shuffled[bi++],p);
-  // дом игрока — ближайший к центру из оставшихся
-  const rest=shuffled.slice(bi).sort((a,b)=>dist(a.bx,a.by,MW/2,MH/2)-dist(b.bx,b.by,MW/2,MH/2));
-  blockPlan.set(rest[0],'home');
-  let pi=0;
-  const restPlans=plans.filter(p=>!bigPlans.includes(p)&&p!=='home');
-  for(let k=1;k<rest.length;k++){
-    blockPlan.set(rest[k],pi<restPlans.length?restPlans[pi++]:'houses');
-  }
-  for(const bl of blocks)buildBlock(bl,blockPlan.get(bl)||'houses');
-  genNature(); // лес, горы, река и единственный мост
-  // фонари вдоль дорог
-  for(const v of ROADV)for(let y=8;y<MH-6;y+=9)lamps.push({x:(v-1)*TILE+16,y:y*TILE});
-  for(const h of ROADH)for(let x=8;x<MW-6;x+=9)lamps.push({x:x*TILE,y:(h-1)*TILE+16});
-  // припаркованные машины
-  for(const v of ROADV)for(let y=7;y<MH-7;y+=riW(5,10)){
-    if(RW()<.5){const cx=v+(RW()<.5?0:3);placeCar(cx,y,true)}}
-  for(const h of ROADH)for(let x=7;x<MW-7;x+=riW(5,10)){
-    if(RW()<.5){const cy=h+(RW()<.5?0:3);placeCar(x,cy,false)}}
-  // автобусные остановки
-  for(const h of ROADH)for(let k=0;k<ROADV.length-1;k++){
-    const x=((ROADV[k]+ROADV[k+1])/2+2)|0;
-    busStops.push({x:x*TILE,y:(h-1)*TILE+10});busStops.push({x:(x+2)*TILE,y:(h+4)*TILE+22});
-  }
-  // пропсы: гидранты, урны, скамейки
-  for(let ty=6;ty<MH-6;ty++)for(let tx=6;tx<MW-6;tx++){
-    if(solid[idx(tx,ty)])continue;
-    const g=ground[idx(tx,ty)];
-    if(g===G_SIDE&&RW()<.012)props.push({x:tx*TILE+16,y:ty*TILE+16,t:RW()<.5?'hydrant':'trash'});
-    else if((g===G_PARK||g===G_SAND)&&RW()<.02)props.push({x:tx*TILE+16,y:ty*TILE+16,t:'bench'});
-  }
+  genTerrain();     // 1. базовая карта: трава/земля/песок/река
+  genRoads();       // 2. дорожная сеть + мост + граф для транспорта
+  genBlocks();      // 3. зонирование, лоты, здания (стены на рёбрах)
+  genNature();      // 4. карта растительности: лес градиентом к окраине
+  genStreetFurniture(); // 5. фонари, парковка, остановки, пропсы
   prerenderGround();
   prerenderMinimap();
 }
-function genNature(){
-  // город окружён лесом и горами; на юге река, через неё — единственный мост
-  const bx=ROADV[2];
-  const ry0=MH-6,ry1=MH-3;
-  for(let y=ry0;y<=ry1;y++)for(let x=0;x<MW;x++){ground[idx(x,y)]=G_WATER;solid[idx(x,y)]=1}
-  const rock=(x,y)=>{if(!inMap(x,y))return;ground[idx(x,y)]=G_ROCK;solid[idx(x,y)]=1};
-  for(let x=0;x<MW;x++){for(let y=0;y<3;y++)rock(x,y);for(let y=MH-2;y<MH;y++)rock(x,y)}
-  for(let y=0;y<MH;y++){for(let x=0;x<3;x++)rock(x,y);for(let x=MW-3;x<MW;x++)rock(x,y)}
-  // плотная лесополоса вдоль каймы
-  const forest=(x,y)=>{
-    if(!inMap(x,y)||solid[idx(x,y)])return;
-    const g=ground[idx(x,y)];
-    if(g===G_ROAD||g===G_SIDE||g===G_WATER||g===G_ROCK)return;
-    if(bmap[idx(x,y)]>=0)return;
-    solid[idx(x,y)]=1;trees.push({x:x*TILE+16,y:y*TILE+16,r:13+RW()*9});
-  };
-  for(let x=3;x<MW-3;x++){if(RW()<.75)forest(x,3);if(RW()<.55)forest(x,4);
-    if(RW()<.75)forest(x,ry0-2);if(RW()<.45)forest(x,ry0-3)}
-  for(let y=3;y<ry0-1;y++){if(RW()<.75)forest(3,y);if(RW()<.55)forest(4,y);
-    if(RW()<.75)forest(MW-4,y);if(RW()<.55)forest(MW-5,y)}
-  // дороги, упирающиеся в лес, закрываем деревьями (тупики)
-  for(const v of ROADV){if(v===bx)continue;
-    for(let x=v-1;x<=v+4;x++){forceTree(x,3);forceTree(x,4)}
-    for(let x=v-1;x<=v+4;x++){forceTree(x,ry0-2);forceTree(x,ry0-1)}}
-  for(const h of ROADH)for(let y=h-1;y<=h+4;y++){forceTree(3,y);forceTree(4,y);forceTree(MW-4,y);forceTree(MW-5,y)}
-  // северный конец мостовой дороги тоже упирается в лес
-  for(let x=bx-1;x<=bx+4;x++){forceTree(x,3);forceTree(x,4)}
-  // мост: настил через реку
-  for(let y=ry0;y<=ry1;y++)for(let x=bx;x<bx+4;x++){ground[idx(x,y)]=G_BRIDGE;solid[idx(x,y)]=0}
-  // стройка: мост закрыт с городской стороны
-  for(let x=bx;x<bx+4;x++)solid[idx(x,ry0)]=1;
-  props.push({x:(bx+2)*TILE,y:ry0*TILE+14,t:'fence'});
-  bridge={cx:(bx+2)*TILE,barY:ry0*TILE,
-    signX:(bx+4)*TILE+14,signY:(ry0-1)*TILE+18,
-    posts:[{x:(bx+1)*TILE-6,y:(ry0+2)*TILE+16},{x:(bx+3)*TILE+6,y:(ry0+2)*TILE+16},
-           {x:(bx+2)*TILE,y:(ry0+3)*TILE+8}]};
+function genTerrain(){
+  nOx=riW(0,9999);nOy=riW(0,9999);
+  riverTop=new Int16Array(MW);riverBot=new Int16Array(MW);
+  const phase=RW()*7;
+  for(let x=0;x<MW;x++){
+    const cy=MH-5+Math.sin(x*.045+phase)*1.6+(vnoise(x,7,11)-.5)*2.4;
+    riverTop[x]=Math.max(MH-9,Math.round(cy-1.4));
+    riverBot[x]=Math.min(MH-2,Math.round(cy+1.4));
+  }
+  for(let y=0;y<MH;y++)for(let x=0;x<MW;x++){
+    if(y>=riverTop[x]&&y<=riverBot[x]){ground[idx(x,y)]=G_WATER;solid[idx(x,y)]=1;continue}
+    if(vnoise(x,y,9)>.74)ground[idx(x,y)]=G_DIRT; // проплешины земли
+  }
+  for(let x=0;x<MW;x++){ // песчаные берега
+    for(const y of[riverTop[x]-1,riverBot[x]+1])
+      if(inMap(x,y)&&ground[idx(x,y)]!==G_WATER&&RW()<.9)ground[idx(x,y)]=G_SAND;
+  }
 }
-function forceTree(x,y){
-  if(!inMap(x,y)||solid[idx(x,y)])return;
-  if(ground[idx(x,y)]===G_WATER||ground[idx(x,y)]===G_ROCK)return;
-  solid[idx(x,y)]=1;trees.push({x:x*TILE+16,y:y*TILE+16,r:14+RW()*8});
+/* ---------- дорожная сеть: трасса к мосту + нерегулярные улицы ---------- */
+function paintSeg(s){
+  const G=s.gravel?G_GRAVEL:G_ROAD;
+  if(s.axis==='v'){
+    for(let y=s.y0;y<=s.y1;y++)for(let x=s.x;x<s.x+s.w;x++)
+      if(inMap(x,y)&&ground[idx(x,y)]!==G_WATER)ground[idx(x,y)]=G;
+    if(!s.gravel)for(let y=s.y0;y<=s.y1;y++)for(const x of[s.x-1,s.x+s.w])
+      if(inMap(x,y)&&(ground[idx(x,y)]===G_GRASS||ground[idx(x,y)]===G_DIRT))ground[idx(x,y)]=G_SIDE;
+  }else{
+    for(let x=s.x0;x<=s.x1;x++)for(let y=s.y;y<s.y+s.w;y++)
+      if(inMap(x,y)&&ground[idx(x,y)]!==G_WATER)ground[idx(x,y)]=G;
+    if(!s.gravel)for(let x=s.x0;x<=s.x1;x++)for(const y of[s.y-1,s.y+s.w])
+      if(inMap(x,y)&&(ground[idx(x,y)]===G_GRASS||ground[idx(x,y)]===G_DIRT))ground[idx(x,y)]=G_SIDE;
+  }
 }
-function placeCar(tx,ty,vert){
-  const w=vert?1:2,h=vert?2:1;
-  for(let y=ty;y<ty+h;y++)for(let x=tx;x<tx+w;x++){if(!inMap(x,y)||ground[idx(x,y)]!==G_ROAD||solid[idx(x,y)])return;}
-  for(let y=ty;y<ty+h;y++)for(let x=tx;x<tx+w;x++)solid[idx(x,y)]=1;
-  cars.push({tx,ty,w,h,c:pickW(['#5a3b3b','#3b4a5a','#4a4a4a','#5a553b','#3b5a46','#666','#553'])});
+function genRoads(){
+  cityRect={x0:16,y0:12,x1:MW-17,y1:MH-19};
+  BX=((MW/2)|0)+riW(-6,4);
+  BY=(((cityRect.y0+cityRect.y1)/2)|0)+riW(-4,4);
+  const addSeg=s=>{roadSegs.push(s);paintSeg(s);return s};
+  const vxs=[{x:BX,w:4,main:true}];
+  for(let x=BX-riW(14,19);x>cityRect.x0+5;x-=riW(14,19))vxs.push({x,w:2});
+  for(let x=BX+4+riW(12,17);x<cityRect.x1-6;x+=riW(14,19))vxs.push({x,w:2});
+  const hys=[{y:BY,w:4,main:true}];
+  for(let y=BY-riW(12,16);y>cityRect.y0+4;y-=riW(12,16))hys.push({y,w:2});
+  for(let y=BY+4+riW(10,14);y<cityRect.y1-5;y+=riW(12,16))hys.push({y,w:2});
+  vxs.sort((a,b)=>a.x-b.x);hys.sort((a,b)=>a.y-b.y);
+  const iBXv=vxs.findIndex(v=>v.main),iBYh=hys.findIndex(h=>h.main);
+  // горизонтальные улицы: не-главные случайно усечены до перекрёстков (тупики, стиль PZ)
+  for(const h of hys){
+    let x0=cityRect.x0-2,x1=cityRect.x1+2;
+    if(!h.main){
+      let i0=riW(0,iBXv),i1=riW(iBXv,vxs.length-1);
+      if(RW()<.55)i0=0; if(RW()<.55)i1=vxs.length-1;
+      x0=i0===0?cityRect.x0-1:vxs[i0].x;
+      x1=i1===vxs.length-1?cityRect.x1+1:vxs[i1].x+vxs[i1].w-1;
+    }
+    h.seg=addSeg({axis:'h',y:h.y,w:h.w,x0,x1,main:!!h.main});
+  }
+  for(const v of vxs){
+    let y0,y1;
+    if(v.main){y0=4;y1=riverTop[v.x]-1} // трасса: от северной опушки до реки
+    else{
+      let i0=riW(0,iBYh),i1=riW(iBYh,hys.length-1);
+      if(RW()<.55)i0=0; if(RW()<.55)i1=hys.length-1;
+      y0=i0===0?cityRect.y0-1:hys[i0].y;
+      y1=i1===hys.length-1?cityRect.y1+1:hys[i1].y+hys[i1].w-1;
+    }
+    v.seg=addSeg({axis:'v',x:v.x,w:v.w,y0,y1,main:!!v.main});
+  }
+  // гравийка в лес — к охотничьему домику
+  const gy=BY+(RW()<.5?-1:1)*riW(8,13);
+  const east=RW()<.5;
+  addSeg({axis:'h',y:gy,w:1,x0:east?cityRect.x1:7,x1:east?MW-8:cityRect.x0,gravel:true,east});
+  // мост через реку по трассе (перекрыт стройзабором)
+  const ry0=riverTop[BX+2],ry1=riverBot[BX+2];
+  for(let y=ry0-1;y<=ry1+1;y++)for(let x=BX;x<BX+4;x++){
+    if(!inMap(x,y))continue;
+    ground[idx(x,y)]=G_BRIDGE;solid[idx(x,y)]=0;
+  }
+  for(let x=BX;x<BX+4;x++)solid[idx(x,ry0-1)]=1;
+  props.push({x:(BX+2)*TILE,y:(ry0-1)*TILE+14,t:'fence'});
+  bridge={cx:(BX+2)*TILE,barY:(ry0-1)*TILE,
+    signX:(BX+4)*TILE+14,signY:(ry0-2)*TILE+18,
+    posts:[{x:(BX+1)*TILE-6,y:(ry0+1)*TILE+16},{x:(BX+3)*TILE+6,y:(ry0+1)*TILE+16},
+           {x:(BX+2)*TILE,y:(ry0+2)*TILE+8}]};
+  // узлы графа дорог (перекрёстки) — по ним ездят машины, такси и автобусы
+  for(const v of roadSegs){
+    if(v.axis!=='v'||v.gravel)continue;
+    for(const h of roadSegs){
+      if(h.axis!=='h'||h.gravel)continue;
+      if(v.x>=h.x0-1&&v.x+v.w-1<=h.x1+1&&h.y>=v.y0-1&&h.y+h.w-1<=v.y1+1)
+        roadNodesL.push({x:(v.x+v.w/2)*TILE,y:(h.y+h.w/2)*TILE,v,h,adj:[]});
+    }
+  }
+  const link=(a,b)=>{if(!a.adj.includes(b)){a.adj.push(b);b.adj.push(a)}};
+  for(const s of roadSegs){
+    if(s.gravel)continue;
+    const on=roadNodesL.filter(n=>s.axis==='v'?n.v===s:n.h===s)
+      .sort((a,b)=>s.axis==='v'?a.y-b.y:a.x-b.x);
+    for(let i=0;i+1<on.length;i++)link(on[i],on[i+1]);
+  }
 }
-function fillBlock(bl,g){for(let y=bl.by;y<bl.by+bl.bh;y++)for(let x=bl.bx;x<bl.bx+bl.bw;x++)ground[idx(x,y)]=g}
+/* ---------- зонирование и застройка блоков ---------- */
+function roadAt(x,y){return inMap(x,y)&&ground[idx(x,y)]===G_ROAD}
+function sideHasStreet(bl,side){
+  const cx=(bl.bx+(bl.bw>>1))|0,cy=(bl.by+(bl.bh>>1))|0;
+  if(side==='S')return roadAt(cx,bl.by+bl.bh+1)||roadAt(cx,bl.by+bl.bh+2);
+  if(side==='N')return roadAt(cx,bl.by-2)||roadAt(cx,bl.by-3);
+  if(side==='E')return roadAt(bl.bx+bl.bw+1,cy)||roadAt(bl.bx+bl.bw+2,cy);
+  return roadAt(bl.bx-2,cy)||roadAt(bl.bx-3,cy);
+}
+function faceOf(bl){
+  for(const s of['S','E','N','W'])if(sideHasStreet(bl,s))return s;
+  return 'S';
+}
+function genBlocks(){
+  const vs=roadSegs.filter(s=>s.axis==='v'&&!s.gravel).sort((a,b)=>a.x-b.x);
+  const hs=roadSegs.filter(s=>s.axis==='h'&&!s.gravel).sort((a,b)=>a.y-b.y);
+  const spansX=[];let px=cityRect.x0;
+  for(const v of vs){spansX.push([px,v.x-2]);px=v.x+v.w+1}
+  spansX.push([px,cityRect.x1]);
+  const spansY=[];let py=cityRect.y0;
+  for(const h of hs){spansY.push([py,h.y-2]);py=h.y+h.w+1}
+  spansY.push([py,cityRect.y1]);
+  for(const[sx0,sx1]of spansX)for(const[sy0,sy1]of spansY){
+    const bw=sx1-sx0+1,bh=sy1-sy0+1;
+    if(bw>=7&&bh>=6)blocksG.push({bx:sx0,by:sy0,bw,bh,area:bw*bh,cx:sx0+bw/2,cy:sy0+bh/2});
+  }
+  const cX=BX+2,cY=BY+2;
+  for(const bl of blocksG)bl.d=Math.hypot(bl.cx-cX,bl.cy-cY);
+  const byDist=blocksG.slice().sort((a,b)=>a.d-b.d);
+  const far=blocksG.slice().sort((a,b)=>b.d-a.d);
+  const used=new Set(),plan=new Map();
+  const setP=(bl,p)=>{if(bl){used.add(bl);plan.set(bl,p)}return bl};
+  const take=f=>byDist.find(b=>!used.has(b)&&(!f||f(b)));
+  const takeBig=min=>byDist.filter(b=>!used.has(b)&&b.area>=min).sort((a,b)=>b.area-a.area)[0]||take();
+  const takeFar=min=>far.find(b=>!used.has(b)&&b.area>=(min||0))||far.find(b=>!used.has(b));
+  // центр: площадь, банк, офис, супермаркет, два торговых ряда
+  setP(take(),'plaza');setP(take(),'bank');setP(take(),'office');
+  setP(takeBig(140),'market');setP(take(),'shopsA');setP(take(),'shopsB');
+  // гражданские службы кольцом вокруг центра
+  setP(takeBig(150),'hospital');setP(take(),'police');setP(take(),'fire');
+  // многоквартирные — среднее кольцо
+  setP(takeBig(150),'flat');setP(takeBig(150),'flat');setP(takeBig(130),'flat');
+  // дом игрока — ближайший жилой к центру
+  setP(take(),'home');
+  // промзона — дальние блоки
+  setP(takeFar(160),'factory');setP(takeFar(0),'autoshop');
+  // пляж у реки + парки
+  setP(far.find(b=>!used.has(b)&&b.by+b.bh>cityRect.y1-8),'beach');
+  setP(takeFar(0),'park');setP(take(),'park');
+  // сначала спец-кварталы, потом жилые; непоместившиеся магазины доезжают в жилые блоки
+  shopQueue=[];
+  for(const bl of blocksG)if(plan.has(bl))buildBlock(bl,plan.get(bl));
+  for(const bl of blocksG){
+    if(plan.has(bl))continue;
+    if(shopQueue.length){
+      fillBlock(bl,G_YARD);
+      const t=shopQueue.splice(0,2);
+      shopQueue.push(...rowOfShops(bl,t,faceOf(bl)));
+      scatterTrees(bl.bx,bl.by,bl.bw,2,2);
+      continue;
+    }
+    buildBlock(bl,'houses');
+  }
+  // гарантия: дом игрока обязан существовать
+  if(!buildings.some(b=>b.type==='home')){
+    const h=buildings.find(b=>b.type==='house');
+    if(h){h.type='home';h.name=BTYPES.home.name;h.roof=BTYPES.home.roof;
+      const c=h.containers.find(c2=>c2.type==='cabinet');if(c)c.special='homekit'}
+  }
+  // охотничий домик в конце гравийки
+  const gr=roadSegs.find(s=>s.gravel);
+  if(gr){
+    const cx2=gr.east?gr.x1-5:gr.x0+1;
+    const b=placeBuilding(cx2,gr.y-6,6,5,'cabin','S');
+    if(b)cabinRect={x0:cx2-2,y0:gr.y-8,x1:cx2+8,y1:gr.y+2};
+  }
+}
+function fillBlock(bl,g){
+  for(let y=bl.by;y<bl.by+bl.bh;y++)for(let x=bl.bx;x<bl.bx+bl.bw;x++){
+    const t=idx(x,y);
+    if(ground[t]===G_GRASS||ground[t]===G_DIRT)ground[t]=g;
+  }
+}
 function scatterTrees(bx,by,bw,bh,n){
   for(let i=0;i<n;i++){const tx=bx+Math.floor(RW()*bw),ty=by+Math.floor(RW()*bh);
-    if(!inMap(tx,ty)||solid[idx(tx,ty)]||ground[idx(tx,ty)]===G_ROAD||ground[idx(tx,ty)]===G_WATER||bmap[idx(tx,ty)]>=0)continue;
+    if(!inMap(tx,ty)||solid[idx(tx,ty)]||bmap[idx(tx,ty)]>=0)continue;
+    const g=ground[idx(tx,ty)];
+    if(g===G_ROAD||g===G_SIDE||g===G_WATER||g===G_GRAVEL||g===G_FLOOR)continue;
     solid[idx(tx,ty)]=1;trees.push({x:tx*TILE+16,y:ty*TILE+16,r:13+RW()*8});}
+}
+let shopQueue=[];
+function rowOfShops(bl,types,face){
+  // ряд магазинов вдоль фасадной улицы; возвращает непоместившиеся типы
+  const{bx,by,bw,bh}=bl;
+  const left=[];
+  let ti=0;
+  if(face==='E'||face==='W'){
+    let y=by+1;
+    while(ti<types.length){
+      const h=Math.min(riW(5,7),by+bh-1-y);
+      if(h<4)break;
+      const w=Math.min(bw-2,riW(6,8));
+      if(w<4)break;
+      if(placeBuilding(face==='W'?bx+1:bx+bw-1-w,y,w,h,types[ti],face))ti++;
+      else break;
+      y+=h+1;
+    }
+  }else{
+    let x=bx+1;
+    const h=Math.min(bh-2,riW(5,7));
+    const yy=face==='N'?by+1:by+bh-1-h;
+    while(ti<types.length){
+      const w=Math.min(riW(5,7),bx+bw-1-x);
+      if(w<4||h<4)break;
+      if(placeBuilding(x,yy,w,h,types[ti],face))ti++;
+      else break;
+      x+=w+1;
+    }
+  }
+  for(;ti<types.length;ti++)left.push(types[ti]);
+  return left;
+}
+function lotFace(bl,ly,lh){
+  // верхний ряд лотов смотрит на север, нижний — на юг (если там есть улица)
+  const north=ly<=bl.by+1;
+  if(north&&sideHasStreet(bl,'N'))return 'N';
+  if(!north&&sideHasStreet(bl,'S'))return 'S';
+  return faceOf(bl);
+}
+function frontPath(b){
+  // дорожка от двери к тротуару + иногда гравийный съезд с машиной
+  const dx=b.face==='E'?1:b.face==='W'?-1:0;
+  const dy=b.face==='S'?1:b.face==='N'?-1:0;
+  let x=b.outX,y=b.outY;
+  for(let k=0;k<5;k++){
+    if(!inMap(x,y))break;
+    const g=ground[idx(x,y)];
+    if(g===G_SIDE||g===G_ROAD||g===G_GRAVEL)break;
+    if(g===G_YARD||g===G_GRASS||g===G_DIRT||g===G_PARK)ground[idx(x,y)]=G_SIDE;
+    x+=dx;y+=dy;
+  }
+  if(RW()<.4){ // съезд
+    let gx=b.face==='S'||b.face==='N'?b.tx+b.tw:b.tx-1;
+    let gy=b.face==='E'||b.face==='W'?b.ty+b.th:b.ty-1;
+    if(b.face==='S'||b.face==='N'){
+      const yy0=b.face==='S'?b.ty+b.th:b.ty-3;
+      for(let k=0;k<3;k++)if(inMap(gx,yy0+k)&&[G_YARD,G_GRASS,G_DIRT].includes(ground[idx(gx,yy0+k)]))ground[idx(gx,yy0+k)]=G_GRAVEL;
+      placeCar(gx,b.face==='S'?b.ty+b.th:b.ty-2,true);
+    }
+  }
 }
 function buildBlock(bl,plan){
   const{bx,by,bw,bh}=bl;
+  const face=faceOf(bl);
   switch(plan){
     case 'park':
       fillBlock(bl,G_PARK);
-      scatterTrees(bx+1,by+1,bw-2,bh-2,Math.floor(bw*bh/16));
+      scatterTrees(bx+1,by+1,bw-2,bh-2,Math.floor(bw*bh/14));
       return;
     case 'plaza':
       fillBlock(bl,G_PLAZA);
@@ -539,290 +796,455 @@ function buildBlock(bl,plan){
       return;
     case 'beach':{
       fillBlock(bl,G_SAND);
-      // озеро
       const cx=bx+bw/2,cy=by+bh/2,rx=bw*.32,ry=bh*.32;
       for(let y=by;y<by+bh;y++)for(let x=bx;x<bx+bw;x++){
         const dx=(x-cx)/rx,dy=(y-cy)/ry;
-        if(dx*dx+dy*dy<1){ground[idx(x,y)]=G_WATER;solid[idx(x,y)]=1}
+        if(dx*dx+dy*dy<1&&ground[idx(x,y)]===G_SAND){ground[idx(x,y)]=G_WATER;solid[idx(x,y)]=1}
       }
       scatterTrees(bx,by,bw,3,3);
       return;}
     case 'factory':
       fillBlock(bl,G_YARD);
-      placeBuilding(bx+1,by+1,Math.min(bw-2,16),Math.min(bh-3,12),'factory');
+      placeBuilding(bx+1,by+1,Math.min(bw-2,16),Math.max(4,Math.min(bh-3,12)),'factory',face);
       return;
     case 'hospital':
       fillBlock(bl,G_PLAZA);
-      placeBuilding(bx+1,by+1,Math.min(bw-2,15),Math.min(bh-3,12),'hosp');
+      placeBuilding(bx+1,by+1,Math.min(bw-2,15),Math.max(4,Math.min(bh-3,12)),'hosp',face);
       scatterTrees(bx,by+bh-2,bw,2,2);
       return;
     case 'flat':
       fillBlock(bl,G_YARD);
-      placeBuilding(bx+1,by+1,Math.min(bw-2,15),Math.min(bh-2,15),'flat');
+      placeBuilding(bx+1,by+1,Math.min(bw-2,15),Math.min(bh-2,14),'flat',face==='N'?'N':'S');
       scatterTrees(bx,by,bw,bh,3);
       return;
     case 'office':
       fillBlock(bl,G_PLAZA);
-      placeBuilding(bx+1,by+1,Math.min(bw-2,13),Math.min(bh-3,10),'office');
+      placeBuilding(bx+1,by+1,Math.min(bw-2,13),Math.max(4,Math.min(bh-3,10)),'office',face);
+      return;
+    case 'bank':
+      fillBlock(bl,G_PLAZA);
+      placeBuilding(bx+1,by+1,Math.min(bw-2,12),Math.max(4,Math.min(bh-3,9)),'bank',face);
+      scatterTrees(bx,by+bh-2,bw,2,2);
+      return;
+    case 'autoshop':
+      fillBlock(bl,G_YARD);
+      placeBuilding(bx+1,by+1,Math.min(bw-2,13),Math.max(4,Math.min(bh-3,9)),'autoshop',face);
       return;
     case 'market':
       fillBlock(bl,G_YARD);
-      placeBuilding(bx+1,by+1,Math.min(bw-2,14),Math.min(bh-3,11),'market');
+      placeBuilding(bx+1,by+1,Math.min(bw-2,14),Math.max(4,Math.min(bh-3,11)),'market',face==='N'?'N':'S');
       return;
     case 'police':
       fillBlock(bl,G_PLAZA);
-      placeBuilding(bx+1,by+1,Math.min(bw-2,11),Math.min(bh-3,8),'police');
+      placeBuilding(bx+1,by+1,Math.min(bw-2,11),Math.max(4,Math.min(bh-3,8)),'police',face);
       scatterTrees(bx,by+bh-2,bw,2,2);
       return;
     case 'fire':
       fillBlock(bl,G_PLAZA);
-      placeBuilding(bx+1,by+1,Math.min(bw-2,12),Math.min(bh-3,8),'fire');
+      placeBuilding(bx+1,by+1,Math.min(bw-2,12),Math.max(4,Math.min(bh-3,8)),'fire',face);
       return;
-    case 'shopsA':{
+    case 'shopsA':
       fillBlock(bl,G_YARD);
-      placeBuilding(bx+1,by+1,8,6,'pharm');
-      placeBuilding(bx+1,by+8,9,6,'tools');
-      if(bw>=13)placeBuilding(bx+10,by+1,Math.min(bw-11,7),6,'cafe');
-      return;}
-    case 'shopsB':{
+      shopQueue.push(...rowOfShops(bl,['pharm','tools','cafe'],face));
+      return;
+    case 'shopsB':
       fillBlock(bl,G_YARD);
-      placeBuilding(bx+1,by+1,8,6,'gun');
-      placeBuilding(bx+1,by+8,Math.min(bw-2,8),6,'cafe');
-      if(bw>=13)placeBuilding(bx+10,by+1,Math.min(bw-11,7),6,'shop');
-      return;}
-    case 'home':{
+      shopQueue.push(...rowOfShops(bl,['gun','cafe','shop'],face));
+      return;
+    case 'home': default:{
       fillBlock(bl,G_YARD);
-      const hw=Math.floor(bw/2),hh=Math.floor(bh/2);
-      const lots=[[bx,by,hw,hh],[bx+hw,by,bw-hw,hh],[bx,by+hh,hw,bh-hh],[bx+hw,by+hh,bw-hw,bh-hh]];
-      lots.forEach(([lx,ly,lw,lh],k)=>{
-        const w=Math.min(lw-1,8),h=Math.min(lh-1,7);
-        if(w<6||h<5){scatterTrees(lx,ly,lw,lh,2);return}
-        placeBuilding(lx,ly,w,h,k===0?'home':'house');
-      });
-      return;}
-    default:{ // houses
-      fillBlock(bl,G_YARD);
-      const hw=Math.floor(bw/2),hh=Math.floor(bh/2);
-      const lots=[[bx,by,hw,hh],[bx+hw,by,bw-hw,hh],[bx,by+hh,hw,bh-hh],[bx+hw,by+hh,bw-hw,bh-hh]];
-      for(const[lx,ly,lw,lh]of lots){
-        const w=Math.min(lw-1,8),h=Math.min(lh-1,7);
-        if(w<6||h<5||RW()<.12){scatterTrees(lx,ly,lw,lh,2);continue}
-        placeBuilding(lx,ly,w,h,'house');
+      // адаптивная нарезка лотов под размер квартала
+      const nx=Math.max(1,Math.floor(bw/7)),ny=Math.max(1,Math.floor(bh/6));
+      const lw=bw/nx,lh=bh/ny;
+      let placedHome=false;
+      for(let iy=0;iy<ny;iy++)for(let ix2=0;ix2<nx;ix2++){
+        const lx=Math.round(bx+ix2*lw),ly=Math.round(by+iy*lh);
+        const lw2=Math.max(1,Math.round(lw)),lh2=Math.max(1,Math.round(lh));
+        const w=Math.min(lw2-2,riW(5,7)),h=Math.min(lh2-2,riW(4,6));
+        if(w<4||h<4||(plan!=='home'&&RW()<.12)){scatterTrees(lx,ly,lw2,lh2,2);continue}
+        const f=(ny>1&&iy===0&&sideHasStreet(bl,'N'))?'N':
+                (iy===ny-1&&sideHasStreet(bl,'S'))?'S':faceOf(bl);
+        const jx=lw2-2-w>0?(RW()*(lw2-2-w))|0:0,jy=lh2-2-h>0?(RW()*(lh2-2-h))|0:0;
+        const hb=placeBuilding(lx+1+jx,ly+1+jy,w,h,plan==='home'&&!placedHome?'home':'house',f);
+        if(hb){if(plan==='home')placedHome=true;frontPath(hb)}
+        if(RW()<.5)scatterTrees(lx,ly,lw2,lh2,1);
       }
+      return;}
+  }
+}
+function genNature(){
+  const rock=(x,y)=>{
+    if(!inMap(x,y))return;
+    const g=ground[idx(x,y)];
+    if(g===G_WATER||g===G_BRIDGE)return;
+    ground[idx(x,y)]=G_ROCK;solid[idx(x,y)]=1;
+  };
+  for(let x=0;x<MW;x++){for(let y=0;y<2;y++)rock(x,y);for(let y=MH-2;y<MH;y++)rock(x,y)}
+  for(let y=0;y<MH;y++){for(let x=0;x<2;x++)rock(x,y);for(let x=MW-2;x<MW;x++)rock(x,y)}
+  // лес: плотность растительности растёт от города к краю карты (vegetation map)
+  for(let y=2;y<MH-2;y++)for(let x=2;x<MW-2;x++){
+    const t=idx(x,y);
+    if(solid[t]||bmap[t]>=0)continue;
+    const g=ground[t];
+    if(g!==G_GRASS&&g!==G_DIRT)continue;
+    const dx=Math.max(cityRect.x0-x,0,x-cityRect.x1);
+    const dy=Math.max(cityRect.y0-y,0,y-cityRect.y1);
+    const outD=Math.max(dx,dy);
+    let dens;
+    if(outD<=0)dens=.004;
+    else dens=clamp(outD/7,.12,1)*.8*(.45+vnoise(x*2,y*2,6)*.9);
+    if(cabinRect&&x>=cabinRect.x0&&x<=cabinRect.x1&&y>=cabinRect.y0&&y<=cabinRect.y1)dens*=.06;
+    if(RW()<dens){solid[t]=1;trees.push({x:x*TILE+16,y:y*TILE+16,r:12+RW()*9})}
+  }
+  // трасса на севере упирается в лес — город закрыт
+  for(let x=BX-1;x<=BX+4;x++){forceTree(x,4);forceTree(x,5)}
+}
+function forceTree(x,y){
+  if(!inMap(x,y)||solid[idx(x,y)])return;
+  const g=ground[idx(x,y)];
+  if(g===G_WATER||g===G_ROCK||g===G_BRIDGE)return;
+  solid[idx(x,y)]=1;trees.push({x:x*TILE+16,y:y*TILE+16,r:14+RW()*8});
+}
+function placeCar(tx,ty,vert){
+  const w=vert?1:2,h=vert?2:1;
+  for(let y=ty;y<ty+h;y++)for(let x=tx;x<tx+w;x++){
+    if(!inMap(x,y)||solid[idx(x,y)])return;
+    const g=ground[idx(x,y)];
+    if(g!==G_ROAD&&g!==G_GRAVEL&&g!==G_PLAZA)return;
+  }
+  for(let y=ty;y<ty+h;y++)for(let x=tx;x<tx+w;x++)solid[idx(x,y)]=1;
+  cars.push({tx,ty,w,h,c:pickW(['#5a3b3b','#3b4a5a','#4a4a4a','#5a553b','#3b5a46','#666','#553'])});
+}
+function genStreetFurniture(){
+  for(const s of roadSegs){
+    if(s.gravel)continue;
+    if(s.axis==='v'){
+      for(let y=s.y0+3,i=0;y<=s.y1-2;y+=9,i++)lamps.push({x:(i%2?s.x+s.w:s.x-1)*TILE+16,y:y*TILE});
+      for(let y=s.y0+3;y<=s.y1-3;y+=riW(5,10))if(RW()<.5)placeCar(RW()<.5?s.x:s.x+s.w-1,y,true);
+    }else{
+      for(let x=s.x0+3,i=0;x<=s.x1-2;x+=9,i++)lamps.push({x:x*TILE,y:(i%2?s.y+s.w:s.y-1)*TILE+16});
+      for(let x=s.x0+3;x<=s.x1-3;x+=riW(5,10))if(RW()<.5)placeCar(x,RW()<.5?s.y:s.y+s.w-1,false);
     }
+  }
+  const mainH=roadSegs.find(s=>s.axis==='h'&&s.main);
+  if(mainH){
+    const xs=roadNodesL.filter(n=>n.h===mainH).map(n=>(n.x/TILE)|0).sort((a,b)=>a-b);
+    for(let k=0;k+1<xs.length;k++){
+      const x=((xs[k]+xs[k+1])/2)|0;
+      busStops.push({x:x*TILE,y:(mainH.y-1)*TILE+10});
+      busStops.push({x:(x+2)*TILE,y:(mainH.y+mainH.w)*TILE+22});
+    }
+  }
+  const mainV=roadSegs.find(s=>s.axis==='v'&&s.main);
+  if(mainV){
+    const ys=roadNodesL.filter(n=>n.v===mainV).map(n=>(n.y/TILE)|0).sort((a,b)=>a-b);
+    for(let k=0;k+1<ys.length;k++){
+      const y=((ys[k]+ys[k+1])/2)|0;
+      busStops.push({x:(mainV.x-1)*TILE+10,y:y*TILE});
+      busStops.push({x:(mainV.x+mainV.w)*TILE+22,y:(y+2)*TILE});
+    }
+  }
+  for(let ty=4;ty<MH-4;ty++)for(let tx=4;tx<MW-4;tx++){
+    if(solid[idx(tx,ty)])continue;
+    const g=ground[idx(tx,ty)];
+    if(g===G_SIDE&&RW()<.012)props.push({x:tx*TILE+16,y:ty*TILE+16,t:RW()<.5?'hydrant':'trash'});
+    else if((g===G_PARK||g===G_SAND)&&RW()<.02)props.push({x:tx*TILE+16,y:ty*TILE+16,t:'bench'});
   }
 }
 
-/* ---------- ЗДАНИЯ И ПЛАНИРОВКИ ---------- */
-function placeBuilding(tx,ty,tw,th,type){
-  if(tw<5||th<5)return null;
-  const id=buildings.length;
-  const b={id,tx,ty,tw,th,type,containers:[],windows:[],doors:[],units:[],
-    jobSpots:[],homeSpots:[],roof:BTYPES[type].roof,name:BTYPES[type].name};
-  for(let y=ty;y<ty+th;y++)for(let x=tx;x<tx+tw;x++){
-    bmap[idx(x,y)]=id;
-    const edge=(x===tx||x===tx+tw-1||y===ty||y===ty+th-1);
-    if(edge){solid[idx(x,y)]=1;ground[idx(x,y)]=G_WALL;}
-    else ground[idx(x,y)]=G_FLOOR;
+/* ============================================================
+   ЗДАНИЯ: стены на РЁБРАХ тайлов (модель Project Zomboid).
+   Комнаты не теряют клетки; двери и окна — тоже на рёбрах.
+   ============================================================ */
+function addDoorEdge(b,tx,ty,side,locked,hp=90){
+  const ek=ekey(tx,ty,side);
+  const d={ek,tx,ty,side,hp,maxhp:hp,state:0,b:b?b.id:-1,locked,broken:false,barricaded:false,bang:0};
+  setEdge(tx,ty,side,E_DOOR);
+  doorsMap.set(ek,d);
+  if(b)b.doors.push(d);
+  return d;
+}
+function addWindow(b,tx,ty,side){
+  if(edgeAt(tx,ty,side)!==E_WALL)return;
+  setEdge(tx,ty,side,E_WIN);
+  b.windows.push({tx,ty,side});
+}
+/* перегородка на W-рёбрах колонки x (между x-1 и x), open — проёмы */
+function ewallV(b,x,y0,y1,open){
+  for(let y=y0;y<=y1;y++){
+    if(open&&open.includes(y))continue;
+    if(edgeAt(x,y,'W')===E_NONE)setEdge(x,y,'W',E_WALL);
   }
-  // главная дверь — всегда на южной стене (виден фасад)
-  const dx=tx+Math.floor(tw/2), dy=ty+th-1;
-  const locked=!['shop','market','pharm','office','tools','gun','hosp','home','cafe'].includes(type);
-  addDoor(b,dx,dy,locked,type==='police'||type==='gun'?160:90);
-  b.doorX=dx;b.doorY=dy;
-  // окна: только север/юг (видны фасады)
-  for(let x=tx+1;x<tx+tw-1;x+=2){
-    if(Math.abs(x-dx)>1){b.windows.push({tx:x,ty:ty+th-1});b.windows.push({tx:x,ty:ty})}
+}
+function ewallH(b,y,x0,x1,open){
+  for(let x=x0;x<=x1;x++){
+    if(open&&open.includes(x))continue;
+    if(edgeAt(x,y,'N')===E_NONE)setEdge(x,y,'N',E_WALL);
+  }
+}
+function placeBuilding(tx,ty,tw,th,type,face){
+  if(tw<4||th<4)return null;
+  face=face||'S';
+  const id=buildings.length;
+  const b={id,tx,ty,tw,th,type,face,containers:[],windows:[],doors:[],units:[],rooms:[],
+    jobSpots:[],homeSpots:[],roof:BTYPES[type].roof,name:BTYPES[type].name,
+    doorX:0,doorY:0,outX:0,outY:0,mainDoor:null};
+  for(let y=ty;y<ty+th;y++)for(let x=tx;x<tx+tw;x++){
+    bmap[idx(x,y)]=id;ground[idx(x,y)]=G_FLOOR;solid[idx(x,y)]=0;
+  }
+  for(let x=tx;x<tx+tw;x++){setEdge(x,ty,'N',E_WALL);setEdge(x,ty+th,'N',E_WALL)}
+  for(let y=ty;y<ty+th;y++){setEdge(tx,y,'W',E_WALL);setEdge(tx+tw,y,'W',E_WALL)}
+  const mx=tx+(tw>>1),my=ty+(th>>1);
+  let dex,dey,side;
+  if(face==='S'){dex=mx;dey=ty+th;side='N';b.doorX=mx;b.doorY=ty+th-1;b.outX=mx;b.outY=ty+th}
+  else if(face==='N'){dex=mx;dey=ty;side='N';b.doorX=mx;b.doorY=ty;b.outX=mx;b.outY=ty-1}
+  else if(face==='E'){dex=tx+tw;dey=my;side='W';b.doorX=tx+tw-1;b.doorY=my;b.outX=tx+tw;b.outY=my}
+  else{dex=tx;dey=my;side='W';b.doorX=tx;b.doorY=my;b.outX=tx-1;b.outY=my}
+  const locked=!['shop','market','pharm','office','tools','gun','hosp','home','cafe','bank','autoshop'].includes(type);
+  b.mainDoor=addDoorEdge(b,dex,dey,side,locked,type==='police'||type==='gun'?160:90);
+  // окна по периметру, все четыре стороны
+  const winEv=2+((RW()*2)|0);
+  for(let x=tx+1;x<tx+tw-1;x++){
+    if(x%winEv)continue;
+    if(!(side==='N'&&dey===ty&&Math.abs(x-dex)<=1))addWindow(b,x,ty,'N');
+    if(!(side==='N'&&dey===ty+th&&Math.abs(x-dex)<=1))addWindow(b,x,ty+th,'N');
+  }
+  for(let y=ty+1;y<ty+th-1;y++){
+    if(y%winEv)continue;
+    if(!(side==='W'&&dex===tx&&Math.abs(y-dey)<=1))addWindow(b,tx,y,'W');
+    if(!(side==='W'&&dex===tx+tw&&Math.abs(y-dey)<=1))addWindow(b,tx+tw,y,'W');
   }
   buildings.push(b);
   planInterior(b);
   return b;
 }
-function addDoor(b,x,y,locked,hp=90){
-  const d={tx:x,ty:y,hp,maxhp:hp,state:0,b:b.id,locked,broken:false,barricaded:false,bang:0};
-  doorsMap.set(idx(x,y),d);b.doors.push(d);
-  ground[idx(x,y)]=G_WALL;solid[idx(x,y)]=1;
-  return d;
-}
-function wallH(b,y,x0,x1,gaps){
-  for(let x=x0;x<=x1;x++){
-    if(gaps&&gaps.includes(x))continue;
-    if(ground[idx(x,y)]!==G_FLOOR)continue;
-    if(nearOpening(b,x,y))continue; // стены не перекрывают подходы к дверям/окнам
-    ground[idx(x,y)]=G_WALL;solid[idx(x,y)]=1;
-  }
-}
-function wallV(b,x,y0,y1,gaps){
-  for(let y=y0;y<=y1;y++){
-    if(gaps&&gaps.includes(y))continue;
-    if(ground[idx(x,y)]!==G_FLOOR)continue;
-    if(nearOpening(b,x,y))continue;
-    ground[idx(x,y)]=G_WALL;solid[idx(x,y)]=1;
-  }
+function canCrossHome(ax,ay,bx,by){ // для планирования: любые двери проходимы
+  let tx,ty,side;
+  if(bx>ax){tx=bx;ty=by;side='W'}else if(bx<ax){tx=ax;ty=ay;side='W'}
+  else if(by>ay){tx=bx;ty=by;side='N'}else{tx=ax;ty=ay;side='N'}
+  const e=edgeAt(tx,ty,side);
+  return e===E_NONE||e===E_DOOR;
 }
 function innerFreeSpot(b){
-  // BFS от внутренней стороны главной двери: гарантированно достижимая точка
-  const startX=b.doorX,startY=b.doorY===b.ty?b.doorY+1:b.doorY-1;
-  const seen=new Set(),q=[[startX,startY,0]];
+  const seen=new Set(),q=[[b.doorX,b.doorY,0]];
   let best=null;
   while(q.length){
-    const [x,y,d]=q.shift();
-    const t=idx(x,y);
+    const [x,y,d]=q.shift(),t=idx(x,y);
     if(seen.has(t))continue;seen.add(t);
-    if(!inMap(x,y)||bmap[t]!==b.id||solid[t]||ground[t]!==G_FLOOR)continue;
+    if(!inMap(x,y)||bmap[t]!==b.id||solid[t])continue;
     let free=0;
-    for(const[dx,dy]of[[1,0],[-1,0],[0,1],[0,-1]])if(inMap(x+dx,y+dy)&&!solid[idx(x+dx,y+dy)])free++;
+    for(const[dx,dy]of[[1,0],[-1,0],[0,1],[0,-1]])
+      if(inMap(x+dx,y+dy)&&!solid[idx(x+dx,y+dy)]&&canCrossHome(x,y,x+dx,y+dy))free++;
     if(d>=2&&free>=2)return {x:x*TILE+16,y:y*TILE+16};
     if(!best||free>=2)best={x:x*TILE+16,y:y*TILE+16};
-    for(const[dx,dy]of[[1,0],[-1,0],[0,1],[0,-1]])q.push([x+dx,y+dy,d+1]);
+    for(const[dx,dy]of[[1,0],[-1,0],[0,1],[0,-1]])
+      if(canCrossHome(x,y,x+dx,y+dy))q.push([x+dx,y+dy,d+1]);
   }
-  return best||{x:(b.tx+2)*TILE+16,y:(b.ty+2)*TILE+16};
+  return best||{x:(b.tx+1)*TILE+16,y:(b.ty+1)*TILE+16};
 }
 function nearOpening(b,x,y){
-  // правило: мебель и ящики никогда не блокируют двери и окна
-  for(const[dx,dy]of[[1,0],[-1,0],[0,1],[0,-1]]){
-    if(doorsMap.has(idx(x+dx,y+dy)))return true;
-  }
-  for(const wn of b.windows){
-    if(Math.abs(wn.tx-x)+Math.abs(wn.ty-y)===1)return true;
+  // мебель и ящики никогда не блокируют двери и окна (рёбра тайла)
+  for(const[tx,ty,side]of[[x,y,'W'],[x,y,'N'],[x+1,y,'W'],[x,y+1,'N']]){
+    const e=edgeAt(tx,ty,side);
+    if(e===E_DOOR||e===E_WIN)return true;
   }
   return false;
 }
 function addC(b,type,x,y,sol=true){
-  if(!inMap(x,y)||ground[idx(x,y)]!==G_FLOOR)return null;
+  if(!inMap(x,y)||ground[idx(x,y)]!==G_FLOOR||solid[idx(x,y)])return null;
+  if(bmap[idx(x,y)]!==b.id)return null;
   if(sol&&nearOpening(b,x,y))return null;
   const c={tx:x,ty:y,type,looted:false,b:b.id,stock:null,hp:90};
   if(sol)solid[idx(x,y)]=1;
   b.containers.push(c);return c;
 }
+/* room definitions: тип комнаты определяет мебель и контейнеры */
+const ROOMDEF={
+  bedroom:['bed','wardrobe'],
+  kitchen:['fridge','cabinet','counter'],
+  living:['sofa','cabinet','table'],
+};
+function furnishRoom(b,rm){
+  const list=ROOMDEF[rm.def]||[];
+  const spots=[];
+  for(let x=rm.x;x<rm.x+rm.w;x++){spots.push([x,rm.y]);spots.push([x,rm.y+rm.h-1])}
+  for(let y=rm.y+1;y<rm.y+rm.h-1;y++){spots.push([rm.x,y]);spots.push([rm.x+rm.w-1,y])}
+  let si=0;
+  for(const t of list){
+    while(si<spots.length){
+      const [sx,sy]=spots[si++];
+      if(addC(b,t,sx,sy))break;
+    }
+  }
+}
 function planInterior(b){
   const{tx,ty,tw,th,type}=b;
-  const ix0=tx+1,iy0=ty+1,ix1=tx+tw-2,iy1=ty+th-2; // внутренняя зона
-  const midX=tx+Math.floor(tw/2);
+  const ix0=tx,iy0=ty,ix1=tx+tw-1,iy1=ty+th-1;
+  const midX=b.doorX;
   switch(type){
-    case 'home': case 'house':{
-      // две-три комнаты
-      const wx=tx+Math.floor(tw/2)-(tw>7?1:0);
-      wallV(b,wx,iy0,iy1,[iy0+1]);
-      if(th>=7)wallH(b,ty+Math.floor(th/2),wx+1,ix1,[midX+1>ix1?ix1:wx+2]);
-      addC(b,'fridge',ix0,iy0);addC(b,'cabinet',ix0,iy1-1);
-      const bed=addC(b,'bed',ix1,iy0,true);
-      addC(b,'wardrobe',ix1-1,iy0);
-      addC(b,'sofa',ix0+1,iy0+2)||addC(b,'sofa',ix0,iy0+2);
+    case 'home': case 'house': case 'cabin':{
+      const wx=tx+Math.ceil(tw/2);
+      if(type!=='cabin'||tw>=6){
+        const doorRow=iy0+1+((RW()*(th-2))|0);
+        addDoorEdge(b,wx,doorRow,'W',false,60);
+        ewallV(b,wx,iy0,iy1);
+        b.rooms.push({x:tx,y:ty,w:wx-tx,h:th,def:'living'});
+        if(th>=6){
+          const wy=ty+Math.ceil(th/2);
+          addDoorEdge(b,wx+((RW()*(tx+tw-wx))|0),wy,'N',false,60);
+          ewallH(b,wy,wx,ix1);
+          b.rooms.push({x:wx,y:ty,w:tx+tw-wx,h:wy-ty,def:'bedroom'});
+          b.rooms.push({x:wx,y:wy,w:tx+tw-wx,h:ty+th-wy,def:'kitchen'});
+        }else{
+          b.rooms.push({x:wx,y:ty,w:tx+tw-wx,h:th,def:'bedroom'});
+        }
+      }else{
+        b.rooms.push({x:tx,y:ty,w:tw,h:th,def:'bedroom'});
+      }
+      for(const rm of b.rooms)furnishRoom(b,rm);
+      if(!b.containers.some(c=>c.type==='bed'))addC(b,'bed',ix1,iy0);
+      if(!b.containers.some(c=>c.type==='fridge'))addC(b,'fridge',ix0,iy1);
       const spot=innerFreeSpot(b);
+      const bed=b.containers.find(c=>c.type==='bed');
       b.homeSpots.push({x:spot.x,y:spot.y,bed});
       if(type==='home'){const c=b.containers.find(c=>c.type==='cabinet');if(c)c.special='homekit'}
       break;}
     case 'flat':{
-      // подъезд: коридор + квартиры с дверями
-      const corrX=midX; // коридор 2 тайла: corrX-1..corrX? возьмём corrX и corrX-1
-      wallV(b,corrX-2,iy0,iy1,[]);wallV(b,corrX+2,iy0,iy1,[]);
-      // горизонтальные стены-перекрытия квартир
-      const unitH=3;
-      for(let uy=iy0+unitH;uy<iy1;uy+=unitH+1){
-        wallH(b,uy,ix0,corrX-3,[]);wallH(b,uy,corrX+3,ix1,[]);
+      const corrX=midX; // коридор 3 колонки: corrX-1..corrX+1
+      for(let uy=iy0;uy+2<=iy1;uy+=3){
+        if(uy>iy0){ewallH(b,uy,ix0,corrX-2);ewallH(b,uy,corrX+2,ix1)}
+        const dl=addDoorEdge(b,corrX-1,uy+1,'W',true,60);
+        const dr=addDoorEdge(b,corrX+2,uy+1,'W',true,60);
+        const bedL=addC(b,'bed',ix0,uy);addC(b,'fridge',ix0,uy+2);addC(b,'cabinet',ix0+1,uy+2);
+        const bedR=addC(b,'bed',ix1,uy);addC(b,'fridge',ix1,uy+2);addC(b,'wardrobe',ix1-1,uy+2);
+        b.units.push({door:dl,spot:{x:(corrX-2)*TILE+10,y:(uy+1)*TILE+16},bed:bedL});
+        b.units.push({door:dr,spot:{x:(corrX+3)*TILE-10,y:(uy+1)*TILE+16},bed:bedR});
       }
-      // двери квартир из коридора
-      let unit=0;
-      for(let uy=iy0;uy+1<=iy1;uy+=unitH+1){
-        const myMid=uy+1;
-        const dl=addDoor(b,corrX-2,myMid,true,60);
-        const dr=addDoor(b,corrX+2,myMid,true,60);
-        // мебель квартир
-        const bedL=addC(b,'bed',ix0,uy,true);addC(b,'fridge',ix0,uy+unitH-1);addC(b,'cabinet',ix0+1,uy+unitH-1);
-        const bedR=addC(b,'bed',ix1,uy,true);addC(b,'fridge',ix1,uy+unitH-1);addC(b,'wardrobe',ix1-1,uy+unitH-1);
-        b.units.push({door:dl,spot:{x:(corrX-4)*TILE,y:(uy+1)*TILE+16},bed:bedL});
-        b.units.push({door:dr,spot:{x:(corrX+4)*TILE,y:(uy+1)*TILE+16},bed:bedR});
-        unit+=2;
-      }
+      ewallV(b,corrX-1,iy0,iy1);
+      ewallV(b,corrX+2,iy0,iy1);
       break;}
     case 'market':{
-      // склад сзади + торговый зал с рядами полок
-      wallH(b,iy0+2,ix0,ix1,[midX]);
+      addDoorEdge(b,midX,iy0+2,'N',false,70);
+      ewallH(b,iy0+2,ix0,ix1); // склад — северные 2 ряда
       addC(b,'crate',ix0,iy0);addC(b,'crate',ix0+1,iy0);addC(b,'crate',ix1,iy0);
-      for(let sx=ix0+1;sx<=ix1-1;sx+=3)for(let sy=iy0+4;sy<=iy1-1;sy++){
-        if((sy-(iy0+4))%3!==2)addC(b,'shelf',sx,sy);
+      for(let sx=ix0+1;sx<=ix1-1;sx+=3)for(let sy=iy0+3;sy<=iy1-2;sy++){
+        if((sy-(iy0+3))%3!==2)addC(b,'shelf',sx,sy);
       }
-      addC(b,'counter',b.doorX-2,iy1);addC(b,'counter',b.doorX+2,iy1);
-      b.jobSpots.push({x:(b.doorX-2)*TILE+16,y:(iy1-1)*TILE},{x:(b.doorX+2)*TILE+16,y:(iy1-1)*TILE},
-        {x:(ix0+2)*TILE,y:(iy0+5)*TILE},{x:(ix1-1)*TILE,y:(iy0+5)*TILE});
+      addC(b,'counter',midX-2,iy1);addC(b,'counter',midX+2,iy1);
+      b.jobSpots.push({x:(midX-2)*TILE+16,y:(iy1-1)*TILE},{x:(midX+2)*TILE+16,y:(iy1-1)*TILE},
+        {x:(ix0+2)*TILE,y:(iy0+4)*TILE},{x:(ix1-1)*TILE,y:(iy0+4)*TILE});
       break;}
     case 'cafe':{
-      addC(b,'counter',midX-1,iy1);addC(b,'counter',midX,iy1);
+      addC(b,'counter',midX-1,iy1);addC(b,'counter',midX+1,iy1);
       addC(b,'fridge',ix0,iy0);addC(b,'shelf',ix0+1,iy0);
       for(let tx2=ix0;tx2<=ix1;tx2+=2)for(let ty2=iy0+2;ty2<=iy1-2;ty2+=2)addC(b,'table',tx2,ty2);
-      b.jobSpots.push({x:(midX-1)*TILE+16,y:(iy1-1)*TILE},{x:midX*TILE+16,y:(iy1-1)*TILE});
+      b.jobSpots.push({x:(midX-1)*TILE+16,y:(iy1-1)*TILE},{x:(midX+1)*TILE+16,y:(iy1-1)*TILE});
       break;}
     case 'shop': case 'pharm': case 'tools': case 'gun':{
       const ct=type==='pharm'?'medcab':type==='tools'?'toolbox':type==='gun'?'gunrack':'shelf';
-      wallH(b,iy0+1,ix1-2,ix1,[]); // кладовка уголок
-      addC(b,'crate',ix1,iy0);
+      if(tw>=6){ // кладовка-угол на северо-востоке
+        ewallV(b,ix1-1,iy0,iy0+1);
+        addDoorEdge(b,ix1-1,iy0+2,'N',false,70);
+        ewallH(b,iy0+2,ix1-1,ix1);
+        addC(b,'crate',ix1,iy0);
+      }
       for(let sx=ix0;sx<=ix1-3;sx++)addC(b,ct,sx,iy0);
-      addC(b,ct,ix0,iy0+2);addC(b,ct,ix1,iy0+3);
-      addC(b,'counter',b.doorX+1,iy1);
-      b.jobSpots.push({x:(b.doorX+1)*TILE+16,y:(iy1-1)*TILE},{x:(ix0+1)*TILE,y:(iy0+2)*TILE});
+      addC(b,ct,ix0,iy0+2);addC(b,ct,ix1,iy1-2);
+      addC(b,'counter',midX+1,iy1);
+      b.jobSpots.push({x:(midX+1)*TILE+16,y:(iy1-1)*TILE},{x:(ix0+1)*TILE,y:(iy0+2)*TILE});
       break;}
     case 'office':{
-      // опенспейс со столами + переговорка
-      wallV(b,ix0+3,iy0,iy0+2,[]);wallH(b,iy0+2,ix0,ix0+3,[ix0+1]);
-      for(let sx=ix0+5;sx<=ix1-1;sx+=2)for(let sy=iy0+1;sy<=iy1-2;sy+=2){
-        addC(b,'desk',sx,sy);
-        b.jobSpots.push({x:sx*TILE+16,y:(sy+1)*TILE+16});
+      ewallV(b,ix0+3,iy0,iy0+1); // переговорка-угол
+      addDoorEdge(b,ix0+1,iy0+2,'N',false,70);
+      ewallH(b,iy0+2,ix0,ix0+2);
+      addC(b,'table',ix0+1,iy0);
+      for(let sx=ix0+4;sx<=ix1-1;sx+=2)for(let sy=iy0+1;sy<=iy1-2;sy+=2){
+        if(addC(b,'desk',sx,sy))b.jobSpots.push({x:sx*TILE+16,y:(sy+1)*TILE+16});
       }
-      addC(b,'cabinet',ix0,iy0);addC(b,'cabinet',ix0,iy1);
+      addC(b,'cabinet',ix0,iy1);addC(b,'cabinet',ix1,iy1);
+      break;}
+    case 'bank':{
+      // хранилище на северо-востоке, за бронедверью
+      ewallV(b,ix1-2,iy0,iy0+2);
+      addDoorEdge(b,ix1-1,iy0+3,'N',true,160);
+      ewallH(b,iy0+3,ix1-2,ix1);
+      const sf=addC(b,'safe',ix1,iy0);if(sf)sf.special='bankvault';
+      addC(b,'safe',ix1-1,iy0);addC(b,'safe',ix1,iy0+1);
+      for(let sx=ix0;sx<=ix1-4;sx++)if((sx-ix0)%3!==2)addC(b,'counter',sx,iy0+5);
+      addC(b,'desk',ix0,iy0);addC(b,'desk',ix0+2,iy0);
+      addC(b,'cabinet',ix0,iy1);
+      b.jobSpots.push({x:ix0*TILE+16,y:(iy0+4)*TILE},{x:(ix0+3)*TILE+16,y:(iy0+4)*TILE},
+        {x:(ix0+1)*TILE,y:(iy0+1)*TILE+16});
+      break;}
+    case 'autoshop':{
+      ewallV(b,ix1-2,iy0,iy0+1); // офис-угол
+      addDoorEdge(b,ix1-1,iy0+2,'N',false,70);
+      ewallH(b,iy0+2,ix1-2,ix1);
+      addC(b,'desk',ix1,iy0);addC(b,'cabinet',ix1-1,iy0);
+      let okCar=true;
+      for(let x=ix0;x<ix0+3;x++)for(let y=iy0+1;y<iy0+3;y++)
+        if(!inMap(x,y)||nearOpening(b,x,y)||solid[idx(x,y)])okCar=false;
+      if(okCar){
+        for(let x=ix0;x<ix0+3;x++)for(let y=iy0+1;y<iy0+3;y++)solid[idx(x,y)]=1;
+        props.push({x:ix0*TILE,y:(iy0+1)*TILE,t:'carfix'});
+      }
+      for(let sx=ix0;sx<=ix1-4;sx+=2)addC(b,'toolbox',sx,iy0);
+      addC(b,'machine',ix0,iy1-1);addC(b,'crate',ix0+1,iy1);
+      addC(b,'counter',midX+1,iy1);
+      b.jobSpots.push({x:(ix0+4)*TILE,y:(iy0+2)*TILE},{x:(midX+1)*TILE+16,y:(iy1-1)*TILE});
       break;}
     case 'factory':{
-      // цех: станки рядами + офис-угол + ящики
-      wallV(b,ix0+3,iy0,iy0+3,[]);wallH(b,iy0+3,ix0,ix0+3,[ix0+1]);
+      ewallV(b,ix0+3,iy0,iy0+2); // офис-угол
+      addDoorEdge(b,ix0+1,iy0+3,'N',false,70);
+      ewallH(b,iy0+3,ix0,ix0+2);
       addC(b,'cabinet',ix0,iy0);addC(b,'desk',ix0+1,iy0);
-      for(let mx=ix0+5;mx<=ix1-2;mx+=3)for(let my=iy0+1;my<=iy1-2;my+=3){
-        addC(b,'machine',mx,my);addC(b,'machine',mx+1,my);
-        b.jobSpots.push({x:mx*TILE+16,y:(my+1)*TILE+16});
+      for(let mx2=ix0+5;mx2<=ix1-2;mx2+=3)for(let my2=iy0+1;my2<=iy1-2;my2+=3){
+        addC(b,'machine',mx2,my2);addC(b,'machine',mx2+1,my2);
+        b.jobSpots.push({x:mx2*TILE+16,y:(my2+1)*TILE+16});
       }
       for(let k=0;k<4;k++)addC(b,'crate',ix0+k,iy1);
       break;}
     case 'hosp':{
-      // приёмная + коридор + палаты
-      const corrX2=midX;
-      wallV(b,corrX2-2,iy0,iy1-3,[]);wallV(b,corrX2+2,iy0,iy1-3,[]);
-      const unitH2=3;
-      for(let uy=iy0+unitH2;uy<iy1-3;uy+=unitH2+1){
-        wallH(b,uy,ix0,corrX2-3,[]);wallH(b,uy,corrX2+3,ix1,[]);
+      const corrX=midX; // коридор к приёмной
+      for(let uy=iy0;uy+2<=iy1-3;uy+=3){
+        if(uy>iy0){ewallH(b,uy,ix0,corrX-2);ewallH(b,uy,corrX+2,ix1)}
+        addDoorEdge(b,corrX-1,uy+1,'W',false,70);
+        addDoorEdge(b,corrX+2,uy+1,'W',false,70);
+        addC(b,'bed',ix0,uy);addC(b,'bed',ix0,uy+2);
+        addC(b,'bed',ix1,uy);addC(b,'bed',ix1,uy+2);
+        addC(b,'medcab',ix0+1,uy);
       }
-      for(let uy=iy0;uy+unitH2-1<=iy1-4;uy+=unitH2+1){
-        addDoor(b,corrX2-2,uy+1,false,70);addDoor(b,corrX2+2,uy+1,false,70);
-        addC(b,'bed',ix0,uy,true);addC(b,'bed',ix0,uy+2,true);
-        addC(b,'bed',ix1,uy,true);addC(b,'bed',ix1,uy+2,true);
-        addC(b,'medcab',corrX2-3,uy+1);
-      }
-      addC(b,'counter',b.doorX-2,iy1);addC(b,'medcab',ix1,iy1);addC(b,'medcab',ix1-1,iy1);
-      b.jobSpots.push({x:(b.doorX-2)*TILE+16,y:(iy1-1)*TILE},{x:(corrX2)*TILE+16,y:(iy0+2)*TILE},
-        {x:(corrX2)*TILE+16,y:(iy0+6)*TILE});
+      ewallV(b,corrX-1,iy0,iy1-3);
+      ewallV(b,corrX+2,iy0,iy1-3);
+      addC(b,'counter',midX-2,iy1);addC(b,'medcab',ix1,iy1);addC(b,'medcab',ix1-1,iy1);
+      b.jobSpots.push({x:(midX-2)*TILE+16,y:(iy1-1)*TILE},{x:corrX*TILE+16,y:(iy0+2)*TILE},
+        {x:corrX*TILE+16,y:(iy0+5)*TILE});
       break;}
     case 'police':{
-      // приёмная + камеры + оружейка
-      wallV(b,ix0+2,iy0,iy0+4,[iy0+1,iy0+3]); // камеры
-      wallH(b,iy0+2,ix0,ix0+2,[]);
-      wallV(b,ix1-3,iy0,iy0+2,[]);wallH(b,iy0+2,ix1-3,ix1,[ix1-1]);
-      const arm=addDoor(b,ix1-1,iy0+2,true,160);arm.locked=true;
+      // камеры на западе
+      ewallH(b,iy0+2,ix0,ix0+1);
+      ewallV(b,ix0+2,iy0,iy0+3,[iy0+1,iy0+3]);
+      // оружейка за бронедверью на северо-востоке
+      ewallV(b,ix1-2,iy0,iy0+2);
+      addDoorEdge(b,ix1-1,iy0+3,'N',true,160);
+      ewallH(b,iy0+3,ix1-2,ix1);
       addC(b,'gunrack',ix1,iy0);addC(b,'gunrack',ix1-1,iy0);
       addC(b,'desk',midX-1,iy1-1);addC(b,'desk',midX+1,iy1-1);
-      b.jobSpots.push({x:(midX-1)*TILE+16,y:(iy1)*TILE},{x:(midX+1)*TILE+16,y:(iy1)*TILE},
+      b.jobSpots.push({x:(midX-1)*TILE+16,y:iy1*TILE},{x:(midX+1)*TILE+16,y:iy1*TILE},
         {x:(ix0+4)*TILE,y:(iy0+2)*TILE});
       break;}
     case 'fire':{
-      // гараж с машиной + кубрик
-      wallV(b,ix1-3,iy0,iy1,[iy0+1]);
-      addC(b,'bed',ix1,iy0,true);addC(b,'bed',ix1,iy0+2,true);
+      ewallV(b,ix1-2,iy0,iy1,[iy0+1]); // кубрик на востоке
+      addC(b,'bed',ix1,iy0);addC(b,'bed',ix1,iy0+2);
       addC(b,'toolbox',ix1,iy1);addC(b,'toolbox',ix1-1,iy1);
-      // пожарная машина (пропс 4x2) — не ставим, если перекроет проёмы
       let ftOk=true;
-      for(let x=ix0;x<ix0+4;x++)for(let y=iy0+1;y<iy0+3;y++)if(nearOpening(b,x,y))ftOk=false;
+      for(let x=ix0;x<ix0+4;x++)for(let y=iy0+1;y<iy0+3;y++)
+        if(!inMap(x,y)||nearOpening(b,x,y)||solid[idx(x,y)])ftOk=false;
       if(ftOk){
         for(let x=ix0;x<ix0+4;x++)for(let y=iy0+1;y<iy0+3;y++)solid[idx(x,y)]=1;
         props.push({x:ix0*TILE,y:(iy0+1)*TILE,t:'firetruck'});
       }
-      b.jobSpots.push({x:(ix0+5)*TILE,y:(iy0+1)*TILE},{x:(ix1-1)*TILE,y:(iy0+1)*TILE});
+      b.jobSpots.push({x:(ix0+5)*TILE,y:(iy0+1)*TILE},{x:(ix1-3)*TILE,y:(iy0+1)*TILE});
       break;}
   }
   // торговые точки: наполняем прилавки товаром (для покупок в день 1)
@@ -839,7 +1261,6 @@ function planInterior(b){
     }
   }
 }
-
 /* ============================================================
    ПРЕДМЕТЫ, ЦЕНЫ, ИНВЕНТАРЬ
    ============================================================ */
@@ -875,11 +1296,11 @@ function countItem(t){return P.inv.reduce((a,s)=>a+(s&&s.t===t?s.c:0),0)}
 function addItem(t,c=1){
   const def=ITEMS[t];
   if(def.stack)for(const s of P.inv){if(s&&s.t===t&&s.c<def.stack){const add=Math.min(c,def.stack-s.c);s.c+=add;c-=add;if(!c)return true}}
-  for(let i=0;i<8;i++)if(!P.inv[i]){P.inv[i]={t,c:Math.min(c,def.stack||1)};c-=P.inv[i].c;if(c<=0)return true}
+  for(let i=0;i<P.inv.length;i++)if(!P.inv[i]){P.inv[i]={t,c:Math.min(c,def.stack||1)};c-=P.inv[i].c;if(c<=0)return true}
   return false;
 }
 function takeItem(t,c=1){
-  for(let i=0;i<8;i++){const s=P.inv[i];if(s&&s.t===t){const d=Math.min(c,s.c);s.c-=d;c-=d;if(!s.c)P.inv[i]=null;if(!c)return true}}
+  for(let i=0;i<P.inv.length;i++){const s=P.inv[i];if(s&&s.t===t){const d=Math.min(c,s.c);s.c-=d;c-=d;if(!s.c)P.inv[i]=null;if(!c)return true}}
   return false;
 }
 function dropSelected(){
@@ -944,6 +1365,9 @@ function lootRoll(ctype){
       if(R()<.4)add('snack',1);if(R()<.15)add('bandage',1);break;
     case 'machine':
       if(R()<.3)add('planks',1);break;
+    case 'safe':
+      if(R()<.6*d)add('ammo9',ri(6,12));if(R()<.35*d)add('pistol',1);
+      if(R()<.45*d)add('antib',1);if(R()<.4)add('pills',1);if(R()<.3)add('lockpick',ri(1,2));break;
     default:{
       const r=R();
       if(r<.25)add('canned',1);else if(r<.45)add(risky?'waterO':'waterS',1);
@@ -955,6 +1379,7 @@ function lootRoll(ctype){
 function searchContainer(c){
   if(c.looted){msg('Пусто.');return}
   c.looted=true;sfx.pickup();
+  if(c.special==='bankvault'){P.money+=2000;sfx.cash();msg('В сейфе пачки наличных: +2000₽','good')}
   let loot;
   if(c.special==='homekit')loot=[{t:'flash',c:1},{t:'radio',c:1},{t:'bat',c:1}];
   else if(c.stock&&c.stock.length)loot=c.stock.map(t=>({t,c:BUYCOUNT[t]||1}));
@@ -970,24 +1395,28 @@ function searchContainer(c){
   }
 }
 
-/* ---------- ДВЕРИ ---------- */
-function doorAt(tx,ty){return doorsMap.get(idx(tx,ty))}
+/* ---------- ДВЕРИ (на рёбрах тайлов) ---------- */
 function openDoor(d,silent){
   if(d.state===1)return;
-  d.state=1;d.barricaded=false;solid[idx(d.tx,d.ty)]=0;d.locked=false;
+  d.state=1;d.barricaded=false;d.locked=false;
   if(!silent)sfx.click();
-  repaintDoor(d);
 }
-function closeDoor(d){d.state=0;solid[idx(d.tx,d.ty)]=1;repaintDoor(d);sfx.click()}
+function closeDoor(d){d.state=0;sfx.click()}
 function damageDoor(d,dmg){
   if(d.state===1)return;
   d.hp-=dmg;d.bang=1;
-  if(d.hp<=0){d.state=1;d.broken=true;d.barricaded=false;solid[idx(d.tx,d.ty)]=0;
-    sfx.breakDoor();addNoise(d.tx*TILE,d.ty*TILE,300);repaintDoor(d);}
-  else{sfx.bang();addNoise(d.tx*TILE,d.ty*TILE,200)}
+  if(d.hp<=0){d.state=1;d.broken=true;d.barricaded=false;
+    sfx.breakDoor();addNoise(doorCx(d),doorCy(d),300);}
+  else{sfx.bang();addNoise(doorCx(d),doorCy(d),200)}
 }
 function barricadeDoor(d){
-  d.state=0;d.barricaded=true;d.hp=140;d.maxhp=140;solid[idx(d.tx,d.ty)]=1;repaintDoor(d);
+  d.state=0;d.barricaded=true;d.hp=140;d.maxhp=140;
+}
+/* внутренний тайл главной двери здания и тайл снаружи */
+function doorInnerTile(d){
+  const a={tx:d.tx,ty:d.ty},b2=d.side==='W'?{tx:d.tx-1,ty:d.ty}:{tx:d.tx,ty:d.ty-1};
+  if(d.b>=0&&inMap(a.tx,a.ty)&&bmap[idx(a.tx,a.ty)]===d.b)return a;
+  return b2;
 }
 
 /* ---------- НОКБЭК без туннелирования сквозь стены ---------- */
@@ -1012,8 +1441,7 @@ function damageFurniture(c,dmg){
   if(c.hp<=0){
     const b=buildings[c.b];
     b.containers.splice(b.containers.indexOf(c),1);
-    const od=doorsMap.get(idx(c.tx,c.ty));
-    solid[idx(c.tx,c.ty)]=od&&od.state===0?1:0;
+    solid[idx(c.tx,c.ty)]=0;
     spray(c.tx*TILE+16,c.ty*TILE+16,'#8a6a3a',12);
     sfx.breakDoor();
   }
@@ -1021,12 +1449,9 @@ function damageFurniture(c,dmg){
 function moveContainer(c,dx,dy){
   const nx=c.tx+dx,ny=c.ty+dy;
   if(!inMap(nx,ny)||solid[idx(nx,ny)])return false;
-  const g=ground[idx(nx,ny)];
-  const dd=doorsMap.get(idx(nx,ny));
-  if(g===G_WATER)return false;
-  if(g===G_WALL&&!(dd&&dd.state===1))return false; // в открытый/выломанный проём — можно (баррикада)
-  const od=doorsMap.get(idx(c.tx,c.ty));
-  solid[idx(c.tx,c.ty)]=od&&od.state===0?1:0;
+  if(ground[idx(nx,ny)]===G_WATER)return false;
+  if(!canCross(c.tx,c.ty,nx,ny,false))return false; // сквозь стену нельзя; через открытый проём — можно (баррикада)
+  solid[idx(c.tx,c.ty)]=0;
   c.tx=nx;c.ty=ny;solid[idx(nx,ny)]=1;
   addNoise(nx*TILE,ny*TILE,130);sfx.bang();
   return true;
@@ -1071,34 +1496,37 @@ function spawnPopulation(){
   // жилые места
   const homes=[];
   for(const b of buildings){
-    if(b.type==='house'){
+    if(b.type==='house'||b.type==='cabin'){
       const s=b.homeSpots[0];
-      homes.push({b,spot:{x:s.x,y:s.y},bed:s.bed,door:doorAt(b.doorX,b.doorY),cap:ri(2,3)});
+      homes.push({b,spot:{x:s.x,y:s.y},bed:s.bed,door:b.mainDoor,cap:ri(2,4)});
     }else if(b.type==='flat'){
-      for(const u of b.units)homes.push({b,spot:u.spot,bed:u.bed,door:u.door,cap:2});
+      for(const u of b.units)homes.push({b,spot:u.spot,bed:u.bed,door:u.door,cap:ri(2,3)});
     }
   }
   // рабочие места: основная часть города работает на заводе
   const jobs=[];
   for(const b of buildings){
-    const capBy={factory:30,hosp:4,office:5,police:5,fire:4,market:4,shop:2,pharm:2,tools:2,gun:2,cafe:2};
+    const capBy={factory:30,hosp:4,office:5,police:5,fire:4,market:4,shop:2,pharm:2,tools:2,gun:2,cafe:2,bank:3,autoshop:2};
     const cap=capBy[b.type]||0;
     for(let i=0;i<cap;i++)if(b.jobSpots.length)
       jobs.push({b,spot:b.jobSpots[i%b.jobSpots.length],type:b.type});
   }
   for(let i=jobs.length-1;i>0;i--){const j=Math.floor(R()*(i+1));[jobs[i],jobs[j]]=[jobs[j],jobs[i]]}
   // 100 жителей
+  const slots=[];
+  for(const hm of homes)for(let k=0;k<hm.cap;k++)slots.push(hm);
+  while(slots.length<95&&homes.length>0)slots.push(homes[(R()*homes.length)|0]);
   let made=0,ji=0;
-  for(const hm of homes){
-    for(let k=0;k<hm.cap&&made<100;k++){
+  for(const hm of slots){
+    for(let k=0;k<1&&made<100;k++){
       const n=spawnNPC('res',hm.spot.x+ri(-10,10),hm.spot.y+ri(-10,10));
       n.home={b:hm.b.id,spot:hm.spot,bed:hm.bed};
-      n.allow.add(idx(hm.b.doorX,hm.b.doorY));
-      if(hm.door)n.allow.add(idx(hm.door.tx,hm.door.ty));
+      n.allow.add(hm.b.mainDoor.ek);
+      if(hm.door)n.allow.add(hm.door.ek);
       if(ji<jobs.length&&R()<.72){
         const j=jobs[ji++];
         n.job={b:j.b.id,spot:j.spot,type:j.type};
-        n.allow.add(idx(j.b.doorX,j.b.doorY));
+        n.allow.add(j.b.mainDoor.ek);
         if(j.type==='police'){n.gun=true}
       }
       const lk=pick(['park','beach','plaza','market','cafe','cafe']);
@@ -1106,7 +1534,7 @@ function spawnPopulation(){
         n.leisure=cafes.length?innerFreeSpot(pick(cafes)):randTileOfGround(G_PARK)}
       else n.leisure=lk==='park'?randTileOfGround(G_PARK):lk==='beach'?randTileOfGround(G_SAND):
         lk==='plaza'?randTileOfGround(G_PLAZA):(()=>{const m=buildings.find(b=>b.type==='market');
-          return {x:m.doorX*TILE+16,y:(m.doorY+2)*TILE}})();
+          return {x:m.outX*TILE+16,y:(m.outY+1)*TILE}})();
       n.wakeH=6.2+R()*1.3;n.workS=7.8+R()*1.2;n.workE=17+R()*1.5;n.sleepH=21.3+R()*1.7;
       n.bike=R()<.15;
       made++;
@@ -1124,8 +1552,8 @@ function spawnPopulation(){
     if(!bb)continue;
     for(let k=0;k<cnt&&ui<unemployed.length;k++){
       const n=unemployed[ui++];
-      n.job={b:bb.id,spot:bb.jobSpots[0]||{x:bb.doorX*TILE+16,y:(bb.doorY+1)*TILE},type:tp};
-      n.allow.add(idx(bb.doorX,bb.doorY));
+      n.job={b:bb.id,spot:bb.jobSpots[0]||{x:bb.doorX*TILE+16,y:bb.doorY*TILE+16},type:tp};
+      n.allow.add(bb.mainDoor.ek);
       if(tp==='courier')n.bike=true;
     }
   }
@@ -1138,10 +1566,24 @@ function spawnMilitary(){
   if(!bridge)return;
   if(npcs.some(n=>n.kind==='mil'&&!n.police))return;
   for(const p of bridge.posts){const m=spawnNPC('mil',p.x,p.y);m.post=p}
-  const r1=[{x:(ROADV[0]+2)*TILE,y:9*TILE},{x:(ROADV[0]+2)*TILE,y:(MH-12)*TILE}];
-  const r2=[{x:10*TILE,y:(ROADH[0]+2)*TILE},{x:(MW-10)*TILE,y:(ROADH[0]+2)*TILE}];
-  const r3=[{x:(ROADV[4]+2)*TILE,y:9*TILE},{x:(ROADV[4]+2)*TILE,y:(MH-12)*TILE}];
-  for(const route of [r1,r2,r3]){
+  // патрули — вдоль крайних улиц города (по графу дорог)
+  const routes=[];
+  if(roadNodesL.length>=2){
+    const ends=(nodes,key)=>{
+      const s=nodes.slice().sort((a,b)=>a[key]-b[key]);
+      return [{x:s[0].x,y:s[0].y},{x:s[s.length-1].x,y:s[s.length-1].y}];
+    };
+    const xs=roadNodesL.map(n=>n.x);
+    const westX=Math.min(...xs),eastX=Math.max(...xs);
+    const west=roadNodesL.filter(n=>n.x===westX),east=roadNodesL.filter(n=>n.x===eastX);
+    if(west.length>=2)routes.push(ends(west,'y'));
+    if(east.length>=2)routes.push(ends(east,'y'));
+    const ys=roadNodesL.map(n=>n.y);
+    const northY=Math.min(...ys);
+    const north=roadNodesL.filter(n=>n.y===northY);
+    if(north.length>=2)routes.push(ends(north,'x'));
+  }
+  for(const route of routes){
     for(let k=0;k<2;k++){const m=spawnNPC('mil',route[0].x+k*24,route[0].y+k*10);
       m.patrol=route;m.pi=0}
   }
@@ -1190,7 +1632,7 @@ function killNPC(n,by){
     if(n.kind==='res'){P.civKills++;
       if(P.civKills>=2&&!P.wanted){P.wanted=true;msg('Вы убийца. Полиция открыла на вас охоту!','bad');
         const pb=buildings.find(b=>b.type==='police');
-        for(let i=0;i<3;i++){const c=spawnNPC('mil',pb.doorX*TILE+ri(-30,30),(pb.doorY+2)*TILE+ri(0,30));c.hunt=P;c.police=true}}}
+        for(let i=0;i<3;i++){const c=spawnNPC('mil',pb.outX*TILE+ri(-30,30),pb.outY*TILE+ri(0,30));c.hunt=P;c.police=true}}}
     if(n.kind==='mil'&&!P.wanted){P.wanted=true;msg('Военные объявили вас врагом!','bad')}
   }
 }
@@ -1227,13 +1669,20 @@ function routeTo(n,px,py){
   const sx=(n.x/TILE)|0,sy=(n.y/TILE)|0,txg=clamp((px/TILE)|0,1,MW-2),tyg=clamp((py/TILE)|0,1,MH-2);
   if(sx===txg&&sy===tyg)return null;
   AS_gen++;
-  const passable=t=>{
-    if(!solid[t])return true;
-    const d=doorsMap.get(t);
-    return !!(d&&(d.state===1||!d.locked||n.allow.has(t)));
+  // переход между соседними тайлами: рёбра-стены непроходимы,
+  // двери — если открыты/не заперты/есть «ключ» (allow)
+  const canPass=(cx,cy,nx2,ny2)=>{
+    let tx2,ty2,side;
+    if(nx2>cx){tx2=nx2;ty2=ny2;side='W'}else if(nx2<cx){tx2=cx;ty2=cy;side='W'}
+    else if(ny2>cy){tx2=nx2;ty2=ny2;side='N'}else{tx2=cx;ty2=cy;side='N'}
+    const e=(side==='N'?edgeN:edgeW)[idx(tx2,ty2)];
+    if(e===E_NONE)return 0;
+    if(e===E_WALL||e===E_WIN)return -1;
+    const d=doorsMap.get(ekey(tx2,ty2,side));
+    return d&&(d.state===1||!d.locked||n.allow.has(d.ek))?1.5:-1;
   };
   const tIdx=idx(txg,tyg);
-  if(!passable(tIdx))return null;
+  if(solid[tIdx])return null;
   heapT.length=0;heapF.length=0;
   const s0=idx(sx,sy);
   heapPush(s0,0);
@@ -1247,8 +1696,10 @@ function routeTo(n,px,py){
       const nx2=cx+(k===0?1:k===1?-1:0),ny2=cy+(k===2?1:k===3?-1:0);
       if(nx2<1||ny2<1||nx2>=MW-1||ny2>=MH-1)continue;
       const nt=idx(nx2,ny2);
-      if(!passable(nt))continue;
-      const ng=AS_g[cur]+tileCost(nt)+(doorsMap.has(nt)?1.5:0);
+      if(solid[nt])continue;
+      const ec=canPass(cx,cy,nx2,ny2);
+      if(ec<0)continue;
+      const ng=AS_g[cur]+tileCost(nt)+ec;
       if(AS_mark[nt]===AS_gen&&AS_g[nt]<=ng)continue;
       AS_mark[nt]=AS_gen;AS_g[nt]=ng;AS_p[nt]=cur;
       heapPush(nt,ng+(Math.abs(nx2-txg)+Math.abs(ny2-tyg))*1.4); // взвешенный A*
@@ -1273,10 +1724,13 @@ function followPath(n,dt,spMul){
   const wp=n.path[n.pathI];
   if(!wp){n.path=null;return false}
   const d=dist(n.x,n.y,wp.x,wp.y);
-  // прохождение двери (своей/открытой): шаг сквозь проём
-  if(doorsMap.has(wp.t)&&d<30){
-    const nxt=n.path[n.pathI+1];
-    if(nxt){n.x=nxt.x;n.y=nxt.y;n.pathI+=2;return true}
+  // NPC сам открывает свою/незапертую дверь на пути (дверь — ребро между тайлами)
+  if(d<44){
+    const ctx2=(n.x/TILE)|0,cty=(n.y/TILE)|0,wtx=(wp.x/TILE)|0,wty=(wp.y/TILE)|0;
+    if(Math.abs(wtx-ctx2)+Math.abs(wty-cty)===1){
+      const dr=doorBetween(ctx2,cty,wtx,wty);
+      if(dr&&dr.state===0&&(!dr.locked||n.allow.has(dr.ek)))openDoor(dr,true);
+    }
   }
   if(d<14){n.pathI++;if(n.pathI>=n.path.length){n.path=null;return false}return true}
   const a=Math.atan2(wp.y-n.y,wp.x-n.x);n.dir=a;
@@ -1363,28 +1817,29 @@ function zombieBrain(z,dt){
     const dtx=(t.x/TILE)|0,dty=(t.y/TILE)|0;
     if(d<200&&!los(z.x,z.y,t.x,t.y)){
       const b=bmap[idx(dtx,dty)];
-      if(b>=0){const door=doorAt(buildings[b].doorX,buildings[b].doorY);
+      if(b>=0){const door=buildings[b].mainDoor;
         if(door&&door.state===0){
-          const ddx=door.tx*TILE+16,ddy=door.ty*TILE+16+24;
+          const ddx=buildings[b].outX*TILE+16,ddy=buildings[b].outY*TILE+16;
           const dd=dist(z.x,z.y,ddx,ddy);
           if(dd<40){if(z.atkT<=0){z.atkT=.9;damageDoor(door,5+z.stats.str)}mx=0;my=0}
           else{const aa=Math.atan2(ddy-z.y,ddx-z.x);mx=Math.cos(aa);my=Math.sin(aa);z.dir=aa}
         }}
     }
   }else if(z.state==='door'){
-    const b=buildings[z.doorB],door=b?doorAt(b.doorX,b.doorY):null;
+    const b=buildings[z.doorB],door=b?b.mainDoor:null;
     z.doorT-=dt;
-    const blockedByFurn=door&&door.state===1&&solid[idx(door.tx,door.ty)];
+    const inner=door?doorInnerTile(door):null;
+    const blockedByFurn=door&&door.state===1&&inner&&solid[idx(inner.tx,inner.ty)];
     if(!door||(door.state===1&&!blockedByFurn)){z.state='invest';z.tx=(b.tx+b.tw/2)*TILE;z.ty=(b.ty+b.th/2)*TILE}
     else if(z.doorT<=0)z.state='idle';
     else{
-      const dx=door.tx*TILE+16,dy=door.ty*TILE+16+22;
+      const dx=b.outX*TILE+16,dy=b.outY*TILE+16;
       const d=dist(z.x,z.y,dx,dy);
       if(d<34){
         if(z.atkT<=0){z.atkT=.9;
-          if(blockedByFurn){const c=containerAt(door.tx,door.ty);if(c)damageFurniture(c,4+z.stats.str)}
+          if(blockedByFurn){const c=containerAt(inner.tx,inner.ty);if(c)damageFurniture(c,4+z.stats.str)}
           else damageDoor(door,4+z.stats.str)}
-        z.dir=Math.atan2(door.ty*TILE+16-z.y,door.tx*TILE+16-z.x)}
+        z.dir=Math.atan2(doorCy(door)-z.y,doorCx(door)-z.x)}
       else{const a=Math.atan2(dy-z.y,dx-z.x);mx=Math.cos(a);my=Math.sin(a);z.dir=a}
     }
   }else if(z.state==='invest'){
@@ -1480,9 +1935,9 @@ function resBrain(n,dt){
     if(n.turning<=0){n.turning=0;turnNPC(n);return}
     if(n.fleeOut&&inB>=0){
       const b=buildings[inB];
-      const d=doorAt(b.doorX,b.doorY);
-      if(d&&d.state===0&&dist(n.x,n.y,d.tx*TILE+16,d.ty*TILE+16)<40)openDoor(d,true);
-      ensurePath(n,'out',b.doorX*TILE+16,(b.doorY+2)*TILE);
+      const d=b.mainDoor;
+      if(d&&d.state===0&&dist(n.x,n.y,doorCx(d),doorCy(d))<40)openDoor(d,true);
+      ensurePath(n,'out',b.outX*TILE+16,b.outY*TILE+16);
       if(followPath(n,dt,1.05))return;
     }else if(n.fleeOut){n.fleeOut=false;n.turning=Math.min(n.turning,1.5+R()*3)}
     n.moveT-=dt;if(n.moveT<=0){n.moveT=1+R();n.wa=R()*7}
@@ -1506,7 +1961,7 @@ function resBrain(n,dt){
       else{n.panic=7;n.threat=threat;n.copTgt=null;
         if(n.stats.int>=6&&!n.hideB){
           let best=null,bd=1e9;
-          for(const b of buildings){const door=doorAt(b.doorX,b.doorY);
+          for(const b of buildings){const door=b.mainDoor;
             if(door&&(door.state===1||!door.locked)){const d=dist(n.x,n.y,b.doorX*TILE,b.doorY*TILE);
               if(d<bd&&d<420){bd=d;best=b}}}
           if(n.home&&dist(n.x,n.y,buildings[n.home.b].doorX*TILE,buildings[n.home.b].doorY*TILE)<500)best=buildings[n.home.b];
@@ -1540,14 +1995,14 @@ function resBrain(n,dt){
   let mx=0,my=0;
   if(n.panic>0&&n.threat&&!n.threat.dead){
     if(n.hideB){
-      const b=n.hideB,door=doorAt(b.doorX,b.doorY);
+      const b=n.hideB,door=b.mainDoor;
       const inx=(b.tx+b.tw/2)*TILE,iny=(b.ty+b.th/2)*TILE;
       const ntx=(n.x/TILE)|0,nty=(n.y/TILE)|0;
       if(bmap[idx(ntx,nty)]===b.id){mx=0;my=0;n.panic=Math.max(n.panic,2)}
       else{
-        const doorOut={x:door.tx*TILE+16,y:door.ty*TILE+16+20};
+        const doorOut={x:b.outX*TILE+16,y:b.outY*TILE+16};
         const dd=dist(n.x,n.y,doorOut.x,doorOut.y);
-        if(dd<30&&door.state===0&&(!door.locked||n.allow.has(idx(door.tx,door.ty))))openDoor(door,true);
+        if(dd<30&&door.state===0&&(!door.locked||n.allow.has(door.ek)))openDoor(door,true);
         const tgt=door.state===1&&dd<40?{x:inx,y:iny}:doorOut;
         const a=Math.atan2(tgt.y-n.y,tgt.x-n.x);mx=Math.cos(a);my=Math.sin(a);n.dir=a;
       }
@@ -1586,7 +2041,7 @@ function resBrain(n,dt){
   // умный укушенный лутает
   if(n.bitten&&!n.escort&&n.stats.int>=6){
     n.moveT-=dt;
-    if(n.moveT<=0||dist(n.x,n.y,n.tx,n.ty)<24){n.moveT=6;const b=pick(buildings);n.tx=b.doorX*TILE;n.ty=(b.doorY+1)*TILE}
+    if(n.moveT<=0||dist(n.x,n.y,n.tx,n.ty)<24){n.moveT=6;const b=pick(buildings);n.tx=b.outX*TILE+16;n.ty=b.outY*TILE+16}
     const a=Math.atan2(n.ty-n.y,n.tx-n.x);
     const sp=npcSpeed(n)*.8;
     n.x+=Math.cos(a)*sp*dt;n.y+=Math.sin(a)*sp*dt;n.dir=a;collide(n);
@@ -1599,7 +2054,7 @@ function resBrain(n,dt){
       n.courT=(n.courT||0)-dt;
       if(!n.path&&n.courT<=0){
         const tgt=pick(buildings.filter(b=>['house','flat','cafe','market','office'].includes(b.type)));
-        ensurePath(n,'del'+((Math.random()*9999)|0),tgt.doorX*TILE+16,(tgt.doorY+2)*TILE);
+        ensurePath(n,'del'+((Math.random()*9999)|0),tgt.outX*TILE+16,tgt.outY*TILE+16);
         n.courT=6+R()*8;
       }
       if(followPath(n,dt,1.1))return;
@@ -1726,11 +2181,9 @@ function milBrain(n,dt){
 function shootRay(x,y,ang,spec,shooter){
   addNoise(x,y,spec.noise||500);
   const dx=Math.cos(ang),dy=Math.sin(ang);
-  let hitX=x+dx*600,hitY=y+dy*600,hitE=null,hitD=600;
-  for(let s=8;s<600;s+=8){
-    const px=x+dx*s,py=y+dy*s;
-    if(isSolid((px/TILE)|0,(py/TILE)|0)){hitX=px;hitY=py;hitD=s;break}
-  }
+  // пуля летит до первой стены-ребра/закрытой двери/мебели; окна простреливаются
+  const rc=castRay(x,y,ang,600);
+  let hitX=rc.x,hitY=rc.y,hitE=null,hitD=rc.d;
   const tryHit=e=>{
     if(e.dead)return;
     const ex=e.x-x,ey=e.y-y;
@@ -1770,7 +2223,7 @@ function playerAttack(){
     return;
   }
   const dmgMul=1+(P.stats.str-5)*.09;
-  P.atkT=wd.rate;P.swing=.18;sfx.swing();
+  P.atkT=wd.rate;P.swing=.18;P.punchT=PUNCH_DUR;sfx.swing();
   if(wd.noise)addNoise(P.x,P.y,wd.noise);
   let hit=false;
   for(const n of npcs){
@@ -1789,8 +2242,13 @@ function playerAttack(){
     }
   }
   const fx=P.x+Math.cos(aim)*36,fy=P.y+Math.sin(aim)*36;
-  const d=doorAt((fx/TILE)|0,(fy/TILE)|0);
-  if(d&&d.state===0){damageDoor(d,wd.dmg*dmgMul);hit=true}
+  let dnear=null,dd2=26;
+  for(const[,dr]of doorsMap){
+    if(dr.state!==0)continue;
+    const q=dist(fx,fy,doorCx(dr),doorCy(dr));
+    if(q<dd2){dd2=q;dnear=dr}
+  }
+  if(dnear){damageDoor(dnear,wd.dmg*dmgMul);hit=true}
   if(hit)sfx.hit();
 }
 function hurtPlayer(dmg,cause){
@@ -1818,7 +2276,7 @@ function snapshotPlayer(){
   return {day,hp:P.hp,food:P.food,water:P.water,inf:P.inf,infRate:P.infRate,
     x:P.x,y:P.y,inv:JSON.parse(JSON.stringify(P.inv)),sel:P.sel,flashOn:P.flashOn,
     wanted:P.wanted,civKills:P.civKills,kills:P.kills,money:P.money,
-    stats:{...P.stats},perk:P.perk,maxhp:P.maxhp};
+    stats:{...P.stats},perk:P.perk,maxhp:P.maxhp,charKey:P.charKey,workType:P.workType};
 }
 function restorePlayer(s){
   P.hp=s.hp;P.food=s.food;P.water=s.water;P.inf=s.inf;P.infRate=s.infRate;
@@ -1832,7 +2290,7 @@ function restorePlayer(s){
    ТРАНСПОРТ: машины, такси, автобусы
    ============================================================ */
 const VCOL={car:['#5a3b3b','#3b4a5a','#4a4a4a','#3b5a46','#775','#446'],taxi:['#c9a92b'],bus:['#3e6a8a'],police:['#2e3e5e'],ambulance:['#e8e8ea']};
-function roadNodes(){const out=[];for(const v of ROADV)for(const h of ROADH)out.push({x:(v+2)*TILE,y:(h+2)*TILE,v,h});return out}
+function roadNodes(){return roadNodesL}
 let NODES=null;
 function spawnVehicle(type){
   if(!NODES)NODES=roadNodes();
@@ -1845,20 +2303,18 @@ function spawnVehicle(type){
 }
 function pickNextNode(veh){
   const cur=veh.node;
-  const cand=NODES.filter(n=>n!==cur&&((n.v===cur.v&&Math.abs(n.h-cur.h)<=24&&n.h!==cur.h&&Math.abs(ROADH.indexOf(n.h)-ROADH.indexOf(cur.h))===1)||
-    (n.h===cur.h&&Math.abs(ROADV.indexOf(n.v)-ROADV.indexOf(cur.v))===1)));
-  if(!cand.length){veh.parked=true;return}
+  if(!cur||!cur.adj||!cur.adj.length){veh.parked=true;return}
   const prev=veh.prevNode;
-  const opts=cand.filter(n=>n!==prev);
+  const opts=cur.adj.filter(n=>n!==prev);
   veh.prevNode=cur;
-  veh.node=pick(opts.length?opts:cand);
+  veh.node=pick(opts.length?opts:cur.adj);
 }
 function callAmbulance(victim){
   if(day>1||victim.ambCalled)return;
   victim.ambCalled=true;
   const hosp=buildings.find(b=>b.type==='hosp');if(!hosp)return;
   const v=spawnVehicle('ambulance');
-  v.x=hosp.doorX*TILE+16;v.y=(hosp.doorY+2)*TILE;
+  v.x=hosp.outX*TILE+16;v.y=(hosp.outY+1)*TILE;
   v.mission={phase:0,victim,hosp};v.max=270;
 }
 function updateVehicle(veh,dt){
@@ -1884,7 +2340,7 @@ function updateVehicle(veh,dt){
         return;
       }
     }else{
-      tx2=m.hosp.doorX*TILE+16;ty2=(m.hosp.doorY+3)*TILE;
+      tx2=m.hosp.outX*TILE+16;ty2=(m.hosp.outY+1)*TILE;
       if(dist(veh.x,veh.y,tx2,ty2)<110){
         vic.inCar=false;vic.cab=null;
         const fb=freeHospBed();
@@ -1973,7 +2429,13 @@ function canTrade(n){
 }
 function doTrade(n){
   const tr=tradeOffer(n);
-  if(tr.done){msg('«Больше нечем меняться. Уходи.»');return}
+  if(tr.done){
+    // Банкир умеет уговаривать: одно повторное предложение в день
+    if(P.perk==='banker'&&n.tradeExtraDay!==day){
+      n.tradeExtraDay=day;n.trade=null;tradeOffer(n);
+      msg('«Ладно, уговорил. Но это последнее.» — новое предложение','good');return;
+    }
+    msg('«Больше нечем меняться. Уходи.»');return}
   if(!takeItem(tr.wants,1)){msg('Нужно: '+ITEMS[tr.wants].n,'bad');return}
   addItem(tr.gives.t,tr.gives.c);
   tr.done=true;sfx.cash();
@@ -2003,7 +2465,8 @@ function scheduleDay(){
   events=[];
   const at=(h,type,data)=>events.push({at:h,type,data,fired:false});
   if(day===1){
-    at(6.2,'msg',{t:'Понедельник. Обычное утро: город просыпается, вам к 9:00 в офис (отмечен на карте).',c:''});
+    at(6.2,'msg',{t:'Понедельник. Обычное утро: город просыпается, вам к 9:00 на работу — '+
+      ({bank:'в банк',autoshop:'в автосервис',hosp:'в больницу'}[P.workType]||'в офис')+' (отмечено на карте).',c:''});
     at(6.35,'msg',{t:'У вас '+(P?P.money:1500)+'₽ — можно заехать в магазины. Мост на юге всё ещё «откроют завтра».',c:''});
     at(9.5,'citynews',{t:'В больнице наплыв пациентов с «агрессивной лихорадкой». Врачи призывают не паниковать. Мост, как обычно, «will open tomorrow».'});
     at(13+R()*2,'pzero',{});
@@ -2157,7 +2620,7 @@ function explosion(x,y){
   const hurt=e=>{const d=dist(x,y,e.x,e.y);if(d<150)return 130*(1-d/150);return 0};
   for(const n of npcs){if(n.dead)continue;const dm=hurt(n);if(dm>0){n.hp-=dm;if(n.hp<=0)killNPC(n,'boom')}}
   if(!P.dead){const dm=hurt(P);if(dm>0)hurtPlayer(dm,'Авиаудар. Вы не услышали предупреждение по радио.')}
-  for(const[,d]of doorsMap){if(d.state===0&&dist(x,y,d.tx*TILE,d.ty*TILE)<150)damageDoor(d,200)}
+  for(const[,d]of doorsMap){if(d.state===0&&dist(x,y,doorCx(d),doorCy(d))<150)damageDoor(d,200)}
 }
 
 /* ---------- СМЕНА ДНЯ ---------- */
@@ -2211,37 +2674,19 @@ function screenAngOf(a){
   return Math.atan2(vy,vx);
 }
 
-/* ---------- СПРАЙТЫ ГЕРОЯ (офисный клерк, 8 направлений) ---------- */
-const DIR8=['e','se','s','sw','w','nw','n','ne'];
-const heroSpr={idle:{},walk:{}};
+/* ---------- СПРАЙТЫ ПЕРСОНАЖЕЙ (PixelLab: листы 8 направлений × кадры, ячейка 128) ---------- */
+const DIR8=['e','se','s','sw','w','nw','n','ne']; // порядок строк в листах
+const CHAR_STATES=['idle','walk','run','sneak','punch'];
+const CHAR_FPS={walk:10,run:14,sneak:8,punch:21};
+const PUNCH_DUR=.38;
+const charSpr={max:{},boris:{},anya:{}};
 let heroAnimT=0;
-async function loadGifAnim(st,d){
-  const url='assets/char/'+st+'_'+d+'.gif';
-  try{
-    if(window.ImageDecoder){
-      const resp=await fetch(url);const buf=await resp.arrayBuffer();
-      const dec=new ImageDecoder({data:buf,type:'image/gif'});
-      await dec.tracks.ready;
-      const cnt=dec.tracks.selectedTrack.frameCount;
-      const frames=[],durs=[];
-      for(let i=0;i<cnt;i++){
-        const r=await dec.decode({frameIndex:i});
-        frames.push(await createImageBitmap(r.image));
-        durs.push(Math.max(60,(r.image.duration||100000)/1000));
-        r.image.close();
-      }
-      heroSpr[st][d]={frames,durs,total:durs.reduce((a,b)=>a+b,0),w:frames[0].width,h:frames[0].height};
-      return;
-    }
-  }catch(e){}
-  await new Promise(res=>{const im=new Image();
-    im.onload=()=>{heroSpr[st][d]={frames:[im],durs:[999],total:999,w:im.naturalWidth,h:im.naturalHeight};res()};
-    im.onerror=res;im.src=url});
-}
-function loadHero(){
-  const t=[];
-  for(const st of ['idle','walk'])for(const d of DIR8)t.push(loadGifAnim(st,d));
-  Promise.allSettled(t);
+function loadChars(){
+  for(const key of Object.keys(charSpr))for(const st of CHAR_STATES){
+    const im=new Image();
+    im.onload=()=>{charSpr[key][st]={img:im,frames:Math.max(1,Math.round(im.width/128))}};
+    im.src='assets/chars/'+key+'/'+st+'.png';
+  }
 }
 
 /* ============================================================
@@ -2251,10 +2696,14 @@ let lastDt=0,ePrev=false,rPrev=false,groanT=2;
 function makePlayer(x,y,build){
   const st=build&&build.stats?{...build.stats}:{spd:5,str:5,int:5,luck:5,hlt:5};
   const maxhp=70+st.hlt*6;
-  return {x,y,r:10,stats:st,perk:build?build.perk:'none',maxhp,hp:maxhp,money:1500,
+  const perk=build?build.perk:'none';
+  const slots=perk==='mechanic'?10:8; // автомеханик привык таскать инструмент
+  return {x,y,r:10,stats:st,perk,charKey:build&&build.charKey||'max',
+    workType:build&&build.work||'bank',
+    maxhp,hp:maxhp,money:perk==='banker'?3000:1500,
     stam:100,food:85,water:85,inf:0,infRate:0,curT:0,
-    dir:0,sel:0,inv:new Array(8).fill(null),flashOn:false,sneak:false,
-    atkT:0,swing:0,ch:null,dead:false,wanted:false,kills:0,civKills:0,workDone:false,edgeWarn:false};
+    dir:0,sel:0,inv:new Array(slots).fill(null),flashOn:false,sneak:false,
+    atkT:0,swing:0,punchT:0,ch:null,dead:false,wanted:false,kills:0,civKills:0,workDone:false,edgeWarn:false};
 }
 function winterF(){return day>=89?Math.max(.12,1-(day-88)*.15):1}
 function aimAngle(){const w=screenToWorld(mouse.x,mouse.y);return Math.atan2(w.y-P.y,w.x-P.x)}
@@ -2281,7 +2730,7 @@ function updatePlayer(dt){
   if(!quarantined&&!P.edgeWarn&&(P.x<2.2*TILE||P.x>W-2.2*TILE||P.y<2.2*TILE||P.y>H-2.2*TILE)){
     P.edgeWarn=true;msg('Дальше — поля и перекрытая трасса. Что-то подсказывает вернуться в город.');
   }
-  P.atkT-=dt;P.swing-=dt;
+  P.atkT-=dt;P.swing-=dt;P.punchT-=dt;
   if(mouse.l)playerAttack();
   if(mouse.r&&!rPrev)consumeSelected();
   rPrev=mouse.r;
@@ -2297,10 +2746,15 @@ function updatePlayer(dt){
     if(P.inf>=100){die('Заражение победило. Вы обратились.');return}
   }
   if(day===1&&!P.workDone){
-    const b=buildings.find(b=>b.type==='office');
+    const b=buildings.find(b=>b.type===P.workType);
     if(b&&bmap[idx((P.x/TILE)|0,(P.y/TILE)|0)]===b.id){
       P.workDone=true;
-      msg('Рабочий день прошёл вяло. Коллега Аркадий весь день странно кашлял и смотрел в стену...');
+      const wmsg={
+        bank:'Смена в банке тянулась вечность. Клиент у третьей кассы весь день кашлял и путал собственное имя...',
+        autoshop:'В сервисе тихо. Пригнали одну машину — хозяин был бледный, горячий и всё время что-то бормотал...',
+        hosp:'В больнице аврал: везут людей с «лихорадкой». Один пациент попытался укусить санитара...'
+      };
+      msg(wmsg[P.workType]||'Рабочий день прошёл вяло.');
     }
   }
   if(P.ch){
@@ -2328,13 +2782,13 @@ function findInteract(){
     if(canTrade(n)&&dist(P.x,P.y,n.x,n.y)<46)return{k:'trade',o:n};
   }
   for(const[,d]of doorsMap){
-    if(dist(P.x,P.y,d.tx*TILE+16,d.ty*TILE+16)<50){
+    if(dist(P.x,P.y,doorCx(d),doorCy(d))<46){
       if(d.state===0){
         if(d.barricaded)return{k:'unbar',o:d};
         return{k:d.locked?'lockdoor':'door',o:d};
       }
-      if(d.broken&&countItem('planks')>=2&&!solid[idx(d.tx,d.ty)])return{k:'barricade',o:d};
-      if(!d.broken&&!solid[idx(d.tx,d.ty)])return{k:'closedoor',o:d};
+      if(d.broken&&countItem('planks')>=2)return{k:'barricade',o:d};
+      if(!d.broken)return{k:'closedoor',o:d};
       return null;
     }
   }
@@ -2395,7 +2849,7 @@ function tryInteract(){
       break;
     case 'unbar':
       P.ch={label:'Разбираем баррикаду...',t:0,dur:1.2,
-        fn:()=>{f.o.barricaded=false;f.o.state=1;solid[idx(f.o.tx,f.o.ty)]=0;repaintDoor(f.o);
+        fn:()=>{f.o.barricaded=false;f.o.state=1;
           addItem('planks',1);msg('Баррикада разобрана (+1 доска)')}};
       break;
     case 'bed':{
@@ -2486,8 +2940,8 @@ function roundRect(g,x,y,w,h,r){
 function floorStyle(b,hn){
   switch(b.type){
     case 'hosp':case 'pharm':return `rgb(${168+hn*10|0},${174+hn*10|0},${176+hn*8|0})`;
-    case 'office':case 'police':return `rgb(${76+hn*8|0},${84+hn*8|0},${92+hn*8|0})`;
-    case 'factory':return `rgb(${72+hn*8|0},${72+hn*8|0},${74+hn*8|0})`;
+    case 'office':case 'police':case 'bank':return `rgb(${76+hn*8|0},${84+hn*8|0},${92+hn*8|0})`;
+    case 'factory':case 'autoshop':return `rgb(${72+hn*8|0},${72+hn*8|0},${74+hn*8|0})`;
     case 'market':case 'shop':case 'tools':case 'gun':case 'fire':return `rgb(${92+hn*8|0},${92+hn*8|0},${94+hn*8|0})`;
     default:return `rgb(${112+hn*10|0},${88+hn*8|0},${64+hn*6|0})`;
   }
@@ -2505,9 +2959,8 @@ function prerenderGround(){
       case G_PARK:c=`rgb(${50+hn*14|0},${74+hn*16|0},${46+hn*12|0})`;break;
       case G_PLAZA:c=`rgb(${70+hn*9|0},${72+hn*9|0},${79+hn*9|0})`;break;
       case G_YARD:c=`rgb(${58+hn*11|0},${64+hn*12|0},${48+hn*9|0})`;break;
-      case G_WALL:{const b=buildings[bmap[idx(tx,ty)]];
-        c=b?shade('#8a8a8a',-40):'#3a3a3e';
-        if(b){const fs=floorStyle(b,hn);c=fs}break}
+      case G_DIRT:c=`rgb(${96+hn*12|0},${78+hn*10|0},${54+hn*8|0})`;break;
+      case G_GRAVEL:c=`rgb(${88+hn*10|0},${84+hn*10|0},${76+hn*9|0})`;break;
       case G_FLOOR:{const b=buildings[bmap[idx(tx,ty)]];c=b?floorStyle(b,hn):'#555';break}
       case G_SAND:c=`rgb(${168+hn*14|0},${150+hn*12|0},${106+hn*10|0})`;break;
       case G_WATER:c=`rgb(${24+hn*6|0},${52+hn*8|0},${78+hn*10|0})`;break;
@@ -2543,7 +2996,7 @@ function prerenderGround(){
     if(gr===G_WATER){g.fillStyle=`rgba(255,255,255,${.04+hn*.05})`;g.fillRect(x+2,y+8+((hn*40)%14|0),TILE-4,2)}
     if(gr===G_FLOOR){
       const b=buildings[bmap[idx(tx,ty)]];
-      if(b&&['house','home','flat'].includes(b.type)){
+      if(b&&['house','home','flat','cabin'].includes(b.type)){
         g.strokeStyle='rgba(0,0,0,.13)';g.beginPath();g.moveTo(x,y+16);g.lineTo(x+TILE,y+16);g.stroke();
       }else{g.strokeStyle='rgba(0,0,0,.08)';g.strokeRect(x+.5,y+.5,TILE,TILE)}
       if(b&&b.type==='factory'&&hn>.85){g.fillStyle='rgba(0,0,0,.15)';g.beginPath();g.ellipse(x+16,y+16,10,6,hn,0,7);g.fill()}
@@ -2567,23 +3020,35 @@ function prerenderGround(){
     if(ground[idx(tx,ty+1)]===G_ROAD)g.fillRect(x,y+TILE-3,TILE,3);
     if(ground[idx(tx,ty-1)]===G_ROAD)g.fillRect(x,y,TILE,3);
   }
-  // разметка
+  // разметка: осевые пунктиры главных улиц (по сегментам сети)
   g.strokeStyle='rgba(210,180,90,.4)';g.lineWidth=3;g.setLineDash([18,22]);
-  for(const v of ROADV){g.beginPath();g.moveTo((v+2)*TILE,0);g.lineTo((v+2)*TILE,H);g.stroke()}
-  for(const h of ROADH){g.beginPath();g.moveTo(0,(h+2)*TILE);g.lineTo(W,(h+2)*TILE);g.stroke()}
+  for(const s of roadSegs){
+    if(!s.main)continue;
+    g.beginPath();
+    if(s.axis==='v'){g.moveTo((s.x+s.w/2)*TILE,s.y0*TILE);g.lineTo((s.x+s.w/2)*TILE,(s.y1+1)*TILE)}
+    else{g.moveTo(s.x0*TILE,(s.y+s.w/2)*TILE);g.lineTo((s.x1+1)*TILE,(s.y+s.w/2)*TILE)}
+    g.stroke();
+  }
   g.setLineDash([]);
+  // зебры на перекрёстках с главными улицами
   g.fillStyle='rgba(230,230,230,.30)';
-  for(const v of ROADV)for(const h of ROADH){
-    for(let i=0;i<4;i++){
-      g.fillRect((v+i+.15)*TILE,(h-1)*TILE+10,TILE*.6,6);
-      g.fillRect((v+i+.15)*TILE,(h+4)*TILE+16,TILE*.6,6);
-      g.fillRect((v-1)*TILE+10,(h+i+.15)*TILE,6,TILE*.6);
-      g.fillRect((v+4)*TILE+16,(h+i+.15)*TILE,6,TILE*.6);
+  for(const nd of roadNodesL){
+    if(!nd.v.main&&!nd.h.main)continue;
+    const v=nd.v,h=nd.h;
+    for(let i=0;i<v.w;i++){
+      g.fillRect((v.x+i+.15)*TILE,(h.y-1)*TILE+10,TILE*.6,6);
+      g.fillRect((v.x+i+.15)*TILE,(h.y+h.w)*TILE+16,TILE*.6,6);
+    }
+    for(let i=0;i<h.w;i++){
+      g.fillRect((v.x-1)*TILE+10,(h.y+i+.15)*TILE,6,TILE*.6);
+      g.fillRect((v.x+v.w)*TILE+16,(h.y+i+.15)*TILE,6,TILE*.6);
     }
   }
-  for(const v of ROADV)for(let y=10;y<MH-8;y+=13){
-    g.fillStyle='#2c2e33';g.beginPath();g.arc((v+2)*TILE+9,y*TILE+13,6,0,7);g.fill();
-    g.strokeStyle='rgba(255,255,255,.15)';g.beginPath();g.arc((v+2)*TILE+9,y*TILE+13,6,0,7);g.stroke();
+  // люки вдоль трассы
+  for(let y=8;y<MH-8;y+=13){
+    if(ground[idx(BX+2,y)]!==G_ROAD)continue;
+    g.fillStyle='#2c2e33';g.beginPath();g.arc((BX+2)*TILE+9,y*TILE+13,6,0,7);g.fill();
+    g.strokeStyle='rgba(255,255,255,.15)';g.beginPath();g.arc((BX+2)*TILE+9,y*TILE+13,6,0,7);g.stroke();
   }
   for(const c of cars)paintParkedCar(g,c);
   for(const p of props)paintProp(g,p);
@@ -2595,13 +3060,14 @@ function prerenderGround(){
   }
   // перила моста
   if(bridge){
-    const bx2=ROADV[2]*TILE,ry=(MH-6)*TILE;
+    const bx2=bridge.cx-2*TILE,ry=bridge.barY;
+    const len=(riverBot[BX+2]-riverTop[BX+2]+3)*TILE;
     g.strokeStyle='#5a4a34';g.lineWidth=4;
-    g.beginPath();g.moveTo(bx2+2,ry);g.lineTo(bx2+2,ry+4*TILE);g.stroke();
-    g.beginPath();g.moveTo(bx2+4*TILE-2,ry);g.lineTo(bx2+4*TILE-2,ry+4*TILE);g.stroke();
+    g.beginPath();g.moveTo(bx2+2,ry);g.lineTo(bx2+2,ry+len);g.stroke();
+    g.beginPath();g.moveTo(bx2+4*TILE-2,ry);g.lineTo(bx2+4*TILE-2,ry+len);g.stroke();
     g.lineWidth=1;
     g.fillStyle='#6a5a40';
-    for(let k=0;k<5;k++){g.fillRect(bx2,ry+k*TILE-2,6,6);g.fillRect(bx2+4*TILE-6,ry+k*TILE-2,6,6)}
+    for(let k=0;k<=(len/TILE|0);k++){g.fillRect(bx2,ry+k*TILE-2,6,6);g.fillRect(bx2+4*TILE-6,ry+k*TILE-2,6,6)}
   }
   for(const l of lamps){
     g.fillStyle='rgba(0,0,0,.35)';g.beginPath();g.ellipse(l.x+2,l.y+2,5,3,0,0,7);g.fill();
@@ -2658,6 +3124,18 @@ function paintProp(g,p){
     g.strokeStyle='rgba(0,0,0,.4)';for(let i=0;i<6;i++){g.beginPath();g.moveTo(x+12+i*12,y+h/2-4);g.lineTo(x+12+i*12,y+h/2+4);g.stroke()}
     g.fillStyle='rgba(165,205,235,.6)';roundRect(g,x+w-26,y+8,14,h-24,3);g.fill();
     g.fillStyle='#d9c96a';g.fillRect(x+2,y+4,5,5);g.fillStyle='#4fb2ed';g.fillRect(x+2,y+h-13,5,5);
+  }else if(p.t==='carfix'){ // машина на домкратах в автосервисе
+    const x=p.x,y=p.y,w=3*TILE,h=2*TILE;
+    g.fillStyle='rgba(0,0,0,.4)';roundRect(g,x+5,y+9,w-8,h-14,7);g.fill();
+    // домкраты
+    g.fillStyle='#c9a94b';g.fillRect(x+8,y+h-12,6,8);g.fillRect(x+w-16,y+h-12,6,8);
+    const gd=g.createLinearGradient(x,y,x,y+h);
+    gd.addColorStop(0,'#5a7a9a');gd.addColorStop(1,'#3a5068');
+    g.fillStyle=gd;roundRect(g,x+3,y+5,w-8,h-16,7);g.fill();
+    g.fillStyle='rgba(165,205,235,.55)';roundRect(g,x+w*.3,y+9,w*.34,h-28,3);g.fill();
+    // открытый капот
+    g.fillStyle='#2c3844';roundRect(g,x+w-30,y+7,22,h-20,4);g.fill();
+    g.strokeStyle='rgba(0,0,0,.4)';g.strokeRect(x+w-30,y+7,22,h-20);
   }
 }
 function paintRoadblock(g,gt){
@@ -2699,16 +3177,16 @@ function paintWire(){
     g.fillStyle='#caa94b';g.beginPath();g.arc(t.x,t.y,3.5,0,7);g.fill();
   }
 }
-function repaintDoor(d){/* двери рисуются динамически в изометрии */}
 /* ---------- КРЫШИ ---------- */
 const SIGNC={market:'#3fae6a',pharm:'#41b0c9',gun:'#c94848',tools:'#e8a33d',police:'#5a7ae0',
-  office:'#8a93a5',shop:'#b08a5a',factory:'#7a6a4a',fire:'#d05540',hosp:'#e05a5a'};
+  office:'#8a93a5',shop:'#b08a5a',factory:'#7a6a4a',fire:'#d05540',hosp:'#e05a5a',
+  bank:'#c9a94b',autoshop:'#5a8ac9'};
 function buildRoofSprite(b){
   const pad=10,bw=b.tw*TILE,bh=b.th*TILE;
   const cn=document.createElement('canvas');cn.width=bw+pad*2;cn.height=bh+pad*2;
   const g=cn.getContext('2d');g.translate(pad,pad);
   const hn=hash2(b.tx*3+1,b.ty*7+1);
-  if(b.type==='house'||b.type==='home'){
+  if(b.type==='house'||b.type==='home'||b.type==='cabin'){
     g.fillStyle=shade(b.roof,-32);roundRect(g,0,0,bw,bh,5);g.fill();
     if(bw>=bh){
       let gd=g.createLinearGradient(0,3,0,bh/2);
@@ -2839,94 +3317,92 @@ function facePts(ax,ay,bx,by,h0,h1){
   const A=S(ax,ay),B=S(bx,by);
   return [[A[0],A[1]-h0],[B[0],B[1]-h0],[B[0],B[1]-h1],[A[0],A[1]-h1]];
 }
-const wallish=(x,y)=>{if(!inMap(x,y))return false;const i2=idx(x,y);
-  return ground[i2]===G_WALL||doorsMap.has(i2)};
-function drawWallTile(tx,ty){
-  const t=idx(tx,ty);
-  const door=doorsMap.get(t);
-  const bi=bmap[t];const b=bi>=0?buildings[bi]:null;
-  if(!b)return;
+/* ---------- СТЕНЫ НА РЁБРАХ (Project Zomboid): плита вдоль W/N-грани тайла ---------- */
+function drawEdgeWall(tx,ty,side){
+  const e=edgeAt(tx,ty,side);
+  if(e===E_NONE)return;
   const K=ISOK,H=WALLH*K;
-  const ext=tx===b.tx||tx===b.tx+b.tw-1||ty===b.ty||ty===b.ty+b.th-1;
-  const fc=ext?shade(b.roof,26):'#7a746a';
-  const x0=tx*TILE,x1=x0+TILE,y0=ty*TILE,y1=y0+TILE,xc=x0+16,yc=y0+16;
-  const ew=wallish(tx-1,ty)||wallish(tx+1,ty);
-  const ns=wallish(tx,ty-1)||wallish(tx,ty+1);
-  const isWin=b.windows&&b.windows.some(w=>w.tx===tx&&w.ty===ty);
-  // грань прижата к краю тайла: юг для EW-стен (север. периметр — к северу),
-  // запад для NS-стен (вост. периметр — к востоку). Крышка — вдоль грани.
-  const northRow=ty===b.ty&&ext;
-  const eastCol=tx===b.tx+b.tw-1&&ext;
-  const yl=northRow?y0+3:y1-3;
-  const xl=eastCol?x1-3:x0+3;
+  const t=idx(tx,ty);
+  const nbB=side==='W'?(inMap(tx-1,ty)?bmap[idx(tx-1,ty)]:-1):(inMap(tx,ty-1)?bmap[idx(tx,ty-1)]:-1);
+  const bi=bmap[t]>=0?bmap[t]:nbB;
+  const b=bi>=0?buildings[bi]:null;
+  const ext=(bmap[t]>=0)!==(nbB>=0); // наружная стена: здание ровно с одной стороны
+  const roof=b?b.roof:'#6a6a6a';
+  const door=e===E_DOOR?doorsMap.get(ekey(tx,ty,side)):null;
+  const x0=tx*TILE,x1=x0+TILE,y0=ty*TILE,y1=y0+TILE;
   // прозрачность только если плита ПОЛНОСТЬЮ скрывает героя
   let alpha=1;
-  if((tx+ty)*TILE+30>pDepthG&&pBoxG){
-    if(ew||!ns){
-      const A=S(x0,yl),B=S(x1,yl);
-      if(occludes(Math.min(A[0],B[0]),Math.min(A[1],B[1])-H,Math.max(A[0],B[0]),Math.max(A[1],B[1])))alpha=.3;
-    }
-    if(alpha===1&&ns){
-      const A=S(xl,y0),B=S(xl,y1);
-      if(occludes(Math.min(A[0],B[0]),Math.min(A[1],B[1])-H,Math.max(A[0],B[0]),Math.max(A[1],B[1])))alpha=.3;
-    }
+  if((tx+ty)*TILE+6>pDepthG-40&&pBoxG){
+    const A=side==='N'?S(x0,y0):S(x0,y0),B=side==='N'?S(x1,y0):S(x0,y1);
+    if(occludes(Math.min(A[0],B[0]),Math.min(A[1],B[1])-H,Math.max(A[0],B[0]),Math.max(A[1],B[1])))alpha=.3;
   }
   ctx.globalAlpha=alpha;
-  if(ew||!ns){
-    fillPoly(facePts(x0,yl,x1,yl,0,H),fc);
-    fillPoly(facePts(x0,yl,x1,yl,0,6*K),'rgba(0,0,0,.25)');
-    if(isWin&&!door){
+  if(side==='N'){
+    const ly=y0;
+    fillPoly(facePts(x0,ly,x1,ly,0,H),ext?shade(roof,26):'#7a746a');
+    fillPoly(facePts(x0,ly,x1,ly,0,6*K),'rgba(0,0,0,.25)');
+    if(e===E_WIN){
       const wx0=x0+7,wx1=x1-7;
-      fillPoly(facePts(wx0,yl,wx1,yl,14*K,34*K),'#16202c');
-      fillPoly(facePts(wx0,yl,wx0+7,yl,26*K,33*K),'rgba(150,190,225,.4)');
+      fillPoly(facePts(wx0,ly,wx1,ly,14*K,34*K),'#16202c');
+      fillPoly(facePts(wx0,ly,wx0+7,ly,26*K,33*K),'rgba(150,190,225,.4)');
       ctx.strokeStyle='rgba(235,230,220,.6)';ctx.lineWidth=1.5*K;
-      const fp=facePts(wx0,yl,wx1,yl,14*K,34*K);
+      const fp=facePts(wx0,ly,wx1,ly,14*K,34*K);
       ctx.beginPath();ctx.moveTo(fp[0][0],fp[0][1]);ctx.lineTo(fp[1][0],fp[1][1]);
       ctx.lineTo(fp[2][0],fp[2][1]);ctx.lineTo(fp[3][0],fp[3][1]);ctx.closePath();ctx.stroke();
-      const mm=facePts((wx0+wx1)/2,yl,(wx0+wx1)/2,yl,14*K,34*K);
+      const mm=facePts((wx0+wx1)/2,ly,(wx0+wx1)/2,ly,14*K,34*K);
       ctx.beginPath();ctx.moveTo(mm[0][0],mm[0][1]);ctx.lineTo(mm[3][0],mm[3][1]);ctx.stroke();
       ctx.lineWidth=1;
-      fillPoly(facePts(wx0-2,yl,wx1+2,yl,12*K,14*K),'rgba(255,255,255,.35)');
+      fillPoly(facePts(wx0-2,ly,wx1+2,ly,12*K,14*K),'rgba(255,255,255,.35)');
     }
     if(door){
       const dx0=x0+5,dx1=x1-5;
       if(door.state===0){
         const col=door.barricaded?'#7a6242':door.locked?'#4a3423':'#6a4a2a';
-        fillPoly(facePts(dx0,yl,dx1,yl,0,H-8*K),col);
-        fillPoly(facePts(dx0,yl,dx1,yl,H-11*K,H-8*K),'rgba(255,255,255,.15)');
-        fillPoly(facePts(dx1-7,yl,dx1-4,yl,20*K,24*K),'#c9a94b');
+        fillPoly(facePts(dx0,ly,dx1,ly,0,H-8*K),col);
+        fillPoly(facePts(dx0,ly,dx1,ly,H-11*K,H-8*K),'rgba(255,255,255,.15)');
+        fillPoly(facePts(dx1-7,ly,dx1-4,ly,20*K,24*K),'#c9a94b');
         if(door.barricaded){
           ctx.strokeStyle='#9a8055';ctx.lineWidth=4*K;
-          const p1=facePts(dx0,yl,dx1,yl,6*K,H-12*K);
+          const p1=facePts(dx0,ly,dx1,ly,6*K,H-12*K);
           ctx.beginPath();ctx.moveTo(p1[0][0],p1[0][1]);ctx.lineTo(p1[2][0],p1[2][1]);
           ctx.moveTo(p1[1][0],p1[1][1]);ctx.lineTo(p1[3][0],p1[3][1]);ctx.stroke();ctx.lineWidth=1;
         }
       }else{
-        fillPoly(facePts(dx0,yl,dx1,yl,0,H-6*K),'#0f0c12');
-        if(!door.broken)fillPoly(facePts(dx0,yl,dx0+4,yl,0,H-8*K),'#6a4a2a');
-        else fillPoly(facePts(dx0,yl,dx0+9,yl,0,8*K),'#3a2c1c');
+        fillPoly(facePts(dx0,ly,dx1,ly,0,H-6*K),'rgba(15,12,18,.25)');
+        if(!door.broken)fillPoly(facePts(dx0,ly,dx0+4,ly,0,H-8*K),'#6a4a2a');
+        else fillPoly(facePts(dx0,ly,dx0+9,ly,0,8*K),'#3a2c1c');
       }
     }
-    // крышка вдоль грани (внутрь здания от периметра)
-    const yA=northRow?yl:yl-10, yB=northRow?yl+10:yl;
-    const tp=[S(x0,yA),S(x1,yA),S(x1,yB),S(x0,yB)].map(p=>[p[0],p[1]-H]);
+    const tp=[S(x0,ly-4),S(x1,ly-4),S(x1,ly+4),S(x0,ly+4)].map(p=>[p[0],p[1]-H]);
     fillPoly(tp,'#41444d');
-  }
-  if(ns){
-    fillPoly(facePts(xl,y0,xl,y1,0,H),ext?shade(b.roof,10):'#5f5a50');
-    fillPoly(facePts(xl,y0,xl,y1,0,6*K),'rgba(0,0,0,.3)');
+  }else{
+    const lx=x0;
+    fillPoly(facePts(lx,y0,lx,y1,0,H),ext?shade(roof,10):'#5f5a50');
+    fillPoly(facePts(lx,y0,lx,y1,0,6*K),'rgba(0,0,0,.3)');
+    if(e===E_WIN){
+      const wy0=y0+7,wy1=y1-7;
+      fillPoly(facePts(lx,wy0,lx,wy1,14*K,34*K),'#16202c');
+      fillPoly(facePts(lx,wy0,lx,wy0+7,26*K,33*K),'rgba(150,190,225,.35)');
+      fillPoly(facePts(lx,wy0-2,lx,wy1+2,12*K,14*K),'rgba(255,255,255,.3)');
+    }
     if(door){
       const dy0=y0+5,dy1=y1-5;
       if(door.state===0){
         const col=door.barricaded?'#6a5236':door.locked?'#3e2c1e':'#5a3e22';
-        fillPoly(facePts(xl,dy0,xl,dy1,0,H-8*K),col);
-        fillPoly(facePts(xl,dy1-8,xl,dy1-4,18*K,23*K),'#c9a94b');
+        fillPoly(facePts(lx,dy0,lx,dy1,0,H-8*K),col);
+        fillPoly(facePts(lx,dy1-8,lx,dy1-4,18*K,23*K),'#c9a94b');
+        if(door.barricaded){
+          ctx.strokeStyle='#9a8055';ctx.lineWidth=4*K;
+          const p1=facePts(lx,dy0,lx,dy1,6*K,H-12*K);
+          ctx.beginPath();ctx.moveTo(p1[0][0],p1[0][1]);ctx.lineTo(p1[2][0],p1[2][1]);
+          ctx.moveTo(p1[1][0],p1[1][1]);ctx.lineTo(p1[3][0],p1[3][1]);ctx.stroke();ctx.lineWidth=1;
+        }
       }else{
-        fillPoly(facePts(xl,dy0,xl,dy1,0,H-6*K),'#0f0c12');
+        fillPoly(facePts(lx,dy0,lx,dy1,0,H-6*K),'rgba(15,12,18,.25)');
+        if(!door.broken)fillPoly(facePts(lx,dy0,lx,dy0+4,0,H-8*K),'#5a3e22');
       }
     }
-    const xA=eastCol?xl-10:xl, xB=eastCol?xl:xl+10;
-    const tp=[S(xA,y0),S(xB,y0),S(xB,y1),S(xA,y1)].map(p=>[p[0],p[1]-H]);
+    const tp=[S(lx-4,y0),S(lx+4,y0),S(lx+4,y1),S(lx-4,y1)].map(p=>[p[0],p[1]-H]);
     fillPoly(tp,'#3c3f47');
   }
   ctx.globalAlpha=1;
@@ -2942,9 +3418,9 @@ function drawContainerIso(c){
   const wx=c.tx*TILE+16,wy=c.ty*TILE+16;
   const base={fridge:'#c8c8cc',shelf:'#8a7450',gunrack:'#5a4030',medcab:'#d8e0e4',
     toolbox:'#a04a20',wardrobe:'#6a5238',cabinet:'#7a6448',bed:'#8a4444',sofa:'#7a5a44',
-    crate:'#8a6a3a',desk:'#6a5a48',machine:'#565a60',counter:'#5f5245'}[c.type]||'#777';
+    crate:'#8a6a3a',desk:'#6a5a48',machine:'#565a60',counter:'#5f5245',safe:'#4a4e58'}[c.type]||'#777';
   const hts={bed:10,sofa:15,wardrobe:34,fridge:32,shelf:30,cabinet:22,counter:20,
-    desk:16,crate:18,machine:26,medcab:26,gunrack:26,toolbox:14}[c.type]||20;
+    desk:16,crate:18,machine:26,medcab:26,gunrack:26,toolbox:14,safe:24}[c.type]||20;
   const lootDark=c.looted?-30:0;
   const top=shade2(base,18+lootDark),s1=shade2(base,-6+lootDark),s2=shade2(base,-26+lootDark);
   const K=ISOK,hpx=hts*K;
@@ -3041,6 +3517,8 @@ function npcOutfit(n){
   else if(jt==='taxi'){body='#a98a2b'}
   else if(jt==='bus'){body='#3e6a8a'}
   else if(jt==='cafe'){body='#7a5a3a'}
+  else if(jt==='bank'){body='#3e4257'}
+  else if(jt==='autoshop'){body='#4a5a6e'}
   if(n.kind==='mil'||n.kind==='milinf'){body=n.kind==='milinf'?'#42502e':(n.police?'#2e3e5e':'#4a5540');
     hat=n.police?'#22305a':'#39422f';if(n.kind==='mil')vest='#3a4232'}
   return {body,hat,vest};
@@ -3094,46 +3572,30 @@ function drawFigureIso(n){
     ctx.fillText('!',0,-42)}
   ctx.restore();
 }
-let heroCrop=null;
-function measureHero(spr){
-  // фактические границы персонажа в кадре: без паддинга и «подставки»
-  try{
-    const c=document.createElement('canvas');c.width=spr.w;c.height=spr.h;
-    const g=c.getContext('2d');g.drawImage(spr.frames[0],0,0);
-    const d=g.getImageData(0,0,spr.w,spr.h).data;
-    let y0=-1,y1=-1;
-    for(let y=0;y<spr.h;y++){
-      let cnt=0;
-      for(let x=0;x<spr.w;x++)if(d[(y*spr.w+x)*4+3]>12)cnt++;
-      const isChar=cnt>0&&cnt<=spr.w*.55; // широкие ряды = подставка
-      if(isChar){if(y0<0)y0=y;y1=y}
-    }
-    if(y0<0){y0=0;y1=spr.h-1}
-    heroCrop={y0:Math.max(0,y0-1),h:y1-y0+3};
-  }catch(e){heroCrop={y0:0,h:spr.h}}
-}
 function drawPlayerIso(){
   if(P.dead)return;
   const K=ISOK;
   const [sx,sy]=S(P.x,P.y);
   ctx.fillStyle='rgba(0,0,0,.4)';ctx.beginPath();ctx.ellipse(sx,sy+2,11*K,5*K,0,0,7);ctx.fill();
   const moving=keys['KeyW']||keys['KeyA']||keys['KeyS']||keys['KeyD'];
-  const st=moving?'walk':'idle';
+  const sprint=keys['ShiftLeft']&&P.stam>1&&moving&&!P.sneak;
+  let st='idle';
+  if(P.punchT>0)st='punch';
+  else if(moving)st=P.sneak?'sneak':(sprint?'run':'walk');
+  else if(P.sneak)st='sneak'; // стоит пригнувшись — первый кадр
+  const bank=charSpr[P.charKey]||charSpr.max;
+  const spr=(bank[st]&&bank[st].img.width?bank[st]:bank.idle);
   const deg=(screenAngOf(P.dir)*180/Math.PI+360)%360;
   const di=Math.round(deg/45)%8;
-  const spr=heroSpr[st][DIR8[di]]||heroSpr.idle[DIR8[di]]||heroSpr.idle.s;
-  if(spr&&spr.frames.length){
+  if(spr&&spr.img&&spr.img.complete&&spr.img.width){
     let fi=0;
-    if(spr.frames.length>1){
-      let tt=(heroAnimT*1000)%spr.total;
-      for(let i=0;i<spr.durs.length;i++){if(tt<spr.durs[i]){fi=i;break}tt-=spr.durs[i]}
-    }
-    const im=spr.frames[fi];
-    if(!heroCrop)measureHero(spr);
-    // видимый рост героя в мировом масштабе (эталон — предмаксимальный зум)
-    const vh=24*K, scl=vh/heroCrop.h, w=spr.w*scl, h=heroCrop.h*scl;
+    if(st==='punch')fi=Math.min(spr.frames-1,Math.floor((1-P.punchT/PUNCH_DUR)*spr.frames));
+    else if(st==='sneak'&&!moving)fi=0;
+    else if(spr.frames>1)fi=Math.floor(heroAnimT*(CHAR_FPS[st]||10))%spr.frames;
+    // лист нормализован: ноги на y≈124 из 128, персонаж ~120px
+    const vh=26*K;
     ctx.imageSmoothingEnabled=false;
-    ctx.drawImage(im,0,heroCrop.y0,spr.w,heroCrop.h,sx-w/2,sy-h+3*K,w,h);
+    ctx.drawImage(spr.img,fi*128,di*128,128,128,sx-vh/2,sy-vh*(124/128)+2*K,vh,vh);
     ctx.imageSmoothingEnabled=true;
   }else{
     ctx.save();ctx.translate(sx,sy);ctx.scale(K,K);
@@ -3235,11 +3697,10 @@ function render(){
    pDepthG=pDepth;
    // корпус героя: если он скрыт — герой «фактически за объектом»
    pBoxG={x0:psp[0]-6*ISOK,x1:psp[0]+6*ISOK,y0:psp[1]-26*ISOK,y1:psp[1]-8*ISOK};}
-  for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++){
+  for(let ty=ty0;ty<=Math.min(ty1+1,MH-1);ty++)for(let tx=tx0;tx<=Math.min(tx1+1,MW-1);tx++){
     const t=idx(tx,ty);
-    if(ground[t]===G_WALL||doorsMap.has(t)){
-      list.push({d:(tx+ty)*TILE+30,f:()=>drawWallTile(tx,ty)});
-    }
+    if(edgeW[t]){const ax=tx,ay=ty;list.push({d:(tx+ty)*TILE+5,f:()=>drawEdgeWall(ax,ay,'W')})}
+    if(edgeN[t]){const ax=tx,ay=ty;list.push({d:(tx+ty)*TILE+6,f:()=>drawEdgeWall(ax,ay,'N')})}
   }
   for(const b of buildings){
     if((b.tx+b.tw)*TILE<bx||b.tx*TILE>bx+bw||(b.ty+b.th)*TILE<by||b.ty*TILE>by+bh2)continue;
@@ -3366,7 +3827,8 @@ function renderLight(n){
     for(const lm of lamps)cut(lm.x,lm.y,120,.85);
     for(const b of buildings)for(let i=0;i<b.windows.length;i++){
       if(!litWindow(b,i))continue;
-      const w=b.windows[i];cut(w.tx*TILE+16,w.ty*TILE+16,55,.5);
+      const w=b.windows[i];
+      cut(w.side==='W'?w.tx*TILE:w.tx*TILE+16,w.side==='W'?w.ty*TILE+16:w.ty*TILE,55,.5);
     }
   }
   if(quarantined&&bridge)cut(bridge.cx,bridge.barY+70,220,.85); // прожектора моста
@@ -3398,7 +3860,8 @@ function renderLight(n){
     for(const lm of lamps)halo(lm.x,lm.y,80,255,176,92,.14*n);
     for(const b of buildings)for(let i=0;i<b.windows.length;i++){
       if(!litWindow(b,i))continue;
-      const w=b.windows[i];halo(w.tx*TILE+16,w.ty*TILE+16,36,255,168,80,.16*n);
+      const w=b.windows[i];
+      halo(w.side==='W'?w.tx*TILE:w.tx*TILE+16,w.side==='W'?w.ty*TILE+16:w.ty*TILE,36,255,168,80,.16*n);
     }
   }
   if(quarantined&&bridge)halo(bridge.cx,bridge.barY+70,120,190,215,255,.14*n);
@@ -3469,10 +3932,11 @@ function updateHUD(){
   $('clock').querySelector('.w').textContent=wl.join(' · ');
   $('lowhp').style.opacity=P.hp<P.maxhp*.3?(.4+Math.sin(performance.now()/200)*.25):0;
   const hb=$('hotbar');
-  if(!hb.children.length)for(let i=0;i<8;i++){const s=document.createElement('div');s.className='slot';
-    s.innerHTML=`<span class="n">${i+1}</span><span class="ic"></span><span class="c"></span><span class="risk"></span>`;
-    s.onclick=()=>{P.sel=i};hb.appendChild(s)}
-  for(let i=0;i<8;i++){
+  if(hb.children.length!==P.inv.length){hb.innerHTML='';
+    for(let i=0;i<P.inv.length;i++){const s=document.createElement('div');s.className='slot';
+      s.innerHTML=`<span class="n">${(i+1)%10}</span><span class="ic"></span><span class="c"></span><span class="risk"></span>`;
+      s.onclick=()=>{P.sel=i};hb.appendChild(s)}}
+  for(let i=0;i<P.inv.length;i++){
     const s=hb.children[i],it=P.inv[i];
     s.classList.toggle('sel',P.sel===i);
     s.querySelector('.ic').textContent=it?ITEMS[it.t].icon:'';
@@ -3494,7 +3958,7 @@ function updateMinimap(dt){
     mctx.fillRect(airzone.x0*sx,airzone.y0*sy,(airzone.x1-airzone.x0)*sx,(airzone.y1-airzone.y0)*sy);
   }
   if(day===1&&!P.workDone){
-    const b=buildings.find(b=>b.type==='office');
+    const b=buildings.find(b=>b.type===P.workType);
     if(b){mctx.fillStyle='#4fb2ed';mctx.fillRect(b.tx*TILE*sx-1,b.ty*TILE*sy-1,b.tw*TILE*sx+2,b.th*TILE*sy+2)}
   }
   mctx.fillStyle='#fff';mctx.beginPath();mctx.arc(P.x*sx,P.y*sy,3,0,7);mctx.fill();
@@ -3562,6 +4026,7 @@ function newRun(hc,build){
   const hs=home.homeSpots[0]||{x:(home.tx+2)*TILE,y:(home.ty+2)*TILE};
   P=makePlayer(hs.x,hs.y,build);
   if(P.perk==='survivor'){addItem('radio',1);addItem('knife',1)}
+  if(P.perk==='nurse')addItem('pills',2); // Аня: 2 аптечки со старта
   applyInfectionCurve();
   checkpoints[1]=snapshotPlayer();
   scheduleDay();
@@ -3576,7 +4041,7 @@ function restoreFromDay(d){
   day=d;tod=0;weather='';airzone=null;NODES=null;
   rngS=mulberry32((seed^0x9e3779)+d*7919+deathsRun*104729);
   genWorld();spawnPopulation();
-  P=makePlayer(snap.x,snap.y,{stats:snap.stats,perk:snap.perk});
+  P=makePlayer(snap.x,snap.y,{stats:snap.stats,perk:snap.perk,charKey:snap.charKey,work:snap.workType});
   restorePlayer(snap);
   applyInfectionCurve();
   if(isSolid((P.x/TILE)|0,(P.y/TILE)|0)){
@@ -3663,17 +4128,17 @@ function updateMenuStats(){
    ВЫБОР ПЕРСОНАЖА
    ============================================================ */
 const PERKS={
-  coffee:{n:'Кофеман',d:'Выносливость восстанавливается в полтора раза быстрее'},
-  locksmith:{n:'Медвежатник',d:'Взлом дверей почти вдвое быстрее'},
-  medic:{n:'Иммунитет',d:'Заражение на 35% медленнее, лечение на 50% сильнее'},
-  survivor:{n:'Выживальщик',d:'Старт с радио и ножом; сомнительная еда вдвое безопаснее'},
-  runner:{n:'Бегун',d:'Спринт тратит на треть меньше выносливости'},
+  banker:{n:'Банкир',d:'Стартовый капитал +1500₽; язык подвешен — выжившие соглашаются на повторный обмен'},
+  mechanic:{n:'Автомеханик',d:'+2 ячейки инвентаря — привык таскать инструмент'},
+  nurse:{n:'Медсестра',d:'Старт с 2 аптечками'},
 };
 const CHARS=[
-  {n:'Макс, офисный клерк',img:'assets/char/idle_s.gif',perk:'coffee',stats:{spd:6,str:4,int:7,luck:5,hlt:4}},
-  {n:'Борис, слесарь',icon:'🔧',perk:'locksmith',stats:{spd:4,str:8,int:5,luck:3,hlt:6}},
-  {n:'Аня, медсестра',icon:'💉',perk:'medic',stats:{spd:5,str:3,int:7,luck:4,hlt:7}},
-  {n:'Гена, параноик',icon:'📻',perk:'survivor',stats:{spd:4,str:4,int:6,luck:8,hlt:4}},
+  {key:'max',n:'Макс, банковский работник',img:'assets/chars/max/portrait.png',perk:'banker',work:'bank',
+    stats:{spd:5,str:4,int:7,luck:5,hlt:5}},
+  {key:'boris',n:'Борис, автомеханик',img:'assets/chars/boris/portrait.png',perk:'mechanic',work:'autoshop',
+    stats:{spd:3,str:9,int:5,luck:4,hlt:5}},
+  {key:'anya',n:'Аня, медсестра',img:'assets/chars/anya/portrait.png',perk:'nurse',work:'hosp',
+    stats:{spd:5,str:3,int:6,luck:3,hlt:9}},
 ];
 const STATN={spd:'Скорость',str:'Сила',int:'Интеллект',luck:'Удача',hlt:'Здоровье'};
 const STATHINT={spd:'бег и спринт',str:'урон в ближнем бою',int:'взлом и обыск быстрее, легче красться',
@@ -3690,7 +4155,7 @@ function buildCharsel(){
   const cw=$('chars');cw.innerHTML='';
   CHARS.forEach((c,i)=>{
     const d=document.createElement('div');d.className='ccard'+(i===selChar?' sel':'');
-    const face=c.img?`<img src="${c.img}" style="height:58px;image-rendering:pixelated" alt="">`:`<div class="ic">${c.icon}</div>`;
+    const face=c.img?`<img src="${c.img}" alt="">`:`<div class="ic">${c.icon}</div>`;
     d.innerHTML=`${face}<div class="nm">${c.n}</div>
       <div class="pk">★ ${PERKS[c.perk].n}</div><div class="pd">${PERKS[c.perk].d}</div>`;
     d.onclick=()=>{selChar=i;curStats={...c.stats};sfx.click();buildCharsel()};
@@ -3721,7 +4186,7 @@ $('btnPlay').onclick=()=>{ensureAudio();openCharsel(false)};
 $('btnHard').onclick=()=>{ensureAudio();openCharsel(true)};
 $('btnHelp').onclick=()=>$('help').classList.toggle('hidden');
 $('btnStartRun').onclick=()=>{ensureAudio();
-  lastBuild={stats:{...curStats},perk:CHARS[selChar].perk};
+  lastBuild={stats:{...curStats},perk:CHARS[selChar].perk,charKey:CHARS[selChar].key,work:CHARS[selChar].work};
   newRun(pendingHC,lastBuild)};
 $('btnCharBack').onclick=()=>{$('charsel').classList.add('hidden');$('menu').classList.remove('hidden')};
 $('btnBack').onclick=()=>restoreFromDay(Math.max(1,day-1));
@@ -3731,7 +4196,7 @@ $('btnResume').onclick=()=>setPause(false);
 $('btnQuit').onclick=toMenu;
 
 /* ---------- СТАРТ ---------- */
-resize();makeGrain();updateMenuStats();loadHero();
+resize();makeGrain();updateMenuStats();loadChars();
 </script>
 </body>
 </html>
